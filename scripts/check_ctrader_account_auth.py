@@ -18,7 +18,6 @@ from twisted.python.failure import Failure
 
 from nds_bot.config import load_settings
 
-
 REQUEST_TIMEOUT_SECONDS = 15
 
 
@@ -29,18 +28,14 @@ def select_host(environment: str) -> str:
     if environment == "live":
         return EndPoints.PROTOBUF_LIVE_HOST
 
-    raise ValueError(
-        "CTRADER_ENVIRONMENT must be either 'demo' or 'live'"
-    )
+    raise ValueError("CTRADER_ENVIRONMENT must be either 'demo' or 'live'")
 
 
 def main() -> None:
     settings = load_settings()
 
     if not settings.ctrader_access_token:
-        raise RuntimeError(
-            "CTRADER_ACCESS_TOKEN is not configured in the .env file"
-        )
+        raise RuntimeError("CTRADER_ACCESS_TOKEN is not configured in the .env file")
 
     host = select_host(settings.ctrader_environment)
 
@@ -168,40 +163,38 @@ def main() -> None:
         print("Authorized accounts received:", len(accounts))
 
         if not accounts:
-            print(
-                "No trading account is authorized for this access token"
-            )
+            print("No trading account is authorized for this access token")
             schedule_shutdown()
             return
 
-        expected_is_live = (
-            settings.ctrader_environment == "live"
-        )
+        expected_is_live = settings.ctrader_environment == "live"
 
         matching_accounts = [
-            account
-            for account in accounts
-            if bool(account.isLive) == expected_is_live
+            account for account in accounts if bool(account.isLive) == expected_is_live
         ]
 
         print()
         print("Authorized account list:")
 
         for account in accounts:
-            environment = (
-                "live" if account.isLive else "demo"
-            )
+            environment = "live" if account.isLive else "demo"
 
             broker = (
-                account.brokerTitleShort
-                if account.brokerTitleShort
-                else "(unknown broker)"
+                getattr(
+                    account,
+                    "brokerTitleShort",
+                    None,
+                )
+                or "(not available)"
             )
 
             trader_login = (
-                account.traderLogin
-                if account.traderLogin
-                else "(not provided)"
+                getattr(
+                    account,
+                    "traderLogin",
+                    None,
+                )
+                or "(not provided)"
             )
 
             print(
@@ -232,8 +225,7 @@ def main() -> None:
                 (
                     account
                     for account in matching_accounts
-                    if int(account.ctidTraderAccountId)
-                    == settings.ctrader_account_id
+                    if int(account.ctidTraderAccountId) == settings.ctrader_account_id
                 ),
                 None,
             )
@@ -250,28 +242,16 @@ def main() -> None:
         elif len(matching_accounts) == 1:
             selected_account = matching_accounts[0]
 
-            print(
-                "One matching account found; selecting it "
-                "automatically"
-            )
+            print("One matching account found; selecting it automatically")
 
         else:
-            print(
-                "More than one account matches the selected "
-                "environment"
-            )
-            print(
-                "Set the desired account ID in .env:"
-            )
-            print(
-                "CTRADER_ACCOUNT_ID=<account_id>"
-            )
+            print("More than one account matches the selected environment")
+            print("Set the desired account ID in .env:")
+            print("CTRADER_ACCOUNT_ID=<account_id>")
             schedule_shutdown()
             return
 
-        selected_account_id = int(
-            selected_account.ctidTraderAccountId
-        )
+        selected_account_id = int(selected_account.ctidTraderAccountId)
 
         print(
             "Selected account:",
@@ -299,19 +279,14 @@ def main() -> None:
                 f"client_msg_id={message.clientMsgId!r}",
             )
 
-            if (
-                payload_type
-                == ProtoOAApplicationAuthRes().payloadType
-            ):
+            if payload_type == ProtoOAApplicationAuthRes().payloadType:
                 response = Protobuf.extract(message)
 
                 print(
                     "Received message:",
                     type(response).__name__,
                 )
-                print(
-                    "Application authentication successful"
-                )
+                print("Application authentication successful")
 
                 reactor.callLater(
                     0,
@@ -320,10 +295,7 @@ def main() -> None:
                 )
                 return
 
-            if (
-                payload_type
-                == ProtoOAGetAccountListByAccessTokenRes().payloadType
-            ):
+            if payload_type == ProtoOAGetAccountListByAccessTokenRes().payloadType:
                 response = Protobuf.extract(message)
 
                 print(
@@ -337,19 +309,14 @@ def main() -> None:
                 )
                 return
 
-            if (
-                payload_type
-                == ProtoOAAccountAuthRes().payloadType
-            ):
+            if payload_type == ProtoOAAccountAuthRes().payloadType:
                 response = Protobuf.extract(message)
 
                 print(
                     "Received message:",
                     type(response).__name__,
                 )
-                print(
-                    "Account authentication successful"
-                )
+                print("Account authentication successful")
                 print(
                     "Authenticated account:",
                     response.ctidTraderAccountId,
@@ -372,8 +339,7 @@ def main() -> None:
                 )
                 print(
                     "Description:",
-                    response.description
-                    or "(no description)",
+                    response.description or "(no description)",
                 )
 
                 schedule_shutdown()
@@ -405,9 +371,7 @@ def main() -> None:
             )
 
         except Exception:
-            print(
-                "The connected callback crashed"
-            )
+            print("The connected callback crashed")
             traceback.print_exc()
 
             schedule_shutdown()
@@ -434,9 +398,7 @@ def main() -> None:
 
     client.setConnectedCallback(on_connected)
     client.setDisconnectedCallback(on_disconnected)
-    client.setMessageReceivedCallback(
-        on_message_received
-    )
+    client.setMessageReceivedCallback(on_message_received)
 
     client.startService()
     reactor.run()
