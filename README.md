@@ -11,6 +11,8 @@ Historical Trendbars
       ↓
 Domain Candle
       ↓
+Bull Z (NodeCounterv2 contract)
+      ↓
 Plotly Candlestick Chart
 ```
 
@@ -24,6 +26,28 @@ The generated Plotly page can switch between:
 - Timeframes: `M1`, `M3`, `M15`, `H1`
 
 All eight symbol/timeframe combinations are fetched from cTrader first and then loaded into one browser page, so switching in the chart does not make another API request.
+
+## Bull Z contract
+
+Bull Z is ported from `meysamemadi/NodeCounterv2` and intentionally follows its `FindBullZAnchor` behavior.
+The reference implementation inspected for this port was NodeCounterv2 `main` tree commit `42efd985ee849d000f3e603feddb4f9db66d32e3`.
+
+Rules:
+
+1. Only closed candles participate in Z calculation.
+2. The active reference is the highest High in the latest 200 closed candles.
+3. Equal reference Highs use the newest candle.
+4. Starting immediately before the reference, scan left for the nearest older High strictly greater than the reference High.
+5. If that boundary exists, search for Z from `boundary + 1` through the reference candle. The boundary candle itself is excluded.
+6. If no older High is strictly greater, use ATH mode and search from the beginning of the loaded history through the reference candle.
+7. Z is the lowest Low in that search range.
+8. Equal Lows use the newest candle.
+
+The chart renders `Z` in gold below its candle. The visual offset mirrors NodeCounterv2: `max(35% of candle size, 15 points)`.
+
+The domain also contains NodeCounterv2-compatible manual-time Z resolution, but the current chart uses automatic Bull Z selection.
+
+Because the left-boundary search can scan to the beginning of loaded history, increasing historical depth can change an ATH-mode result if an older higher High becomes available.
 
 ## Historical candle depth
 
@@ -88,7 +112,7 @@ Common broker names may look like `XAUUSD` for Gold and `US30`/`DJ30` for Dow Jo
 python scripts/plot_ctrader_candles.py
 ```
 
-The script authenticates with cTrader, loads metadata for Gold and Dow, backfills historical candles for each of `M1`, `M3`, `M15`, and `H1`, maps every trendbar to the domain `Candle` model, writes `artifacts/ctrader_candles.html`, and opens it in the browser.
+The script authenticates with cTrader, loads metadata for Gold and Dow, backfills historical candles for each of `M1`, `M3`, `M15`, and `H1`, maps every trendbar to the domain `Candle` model, calculates Bull Z on closed candles, writes `artifacts/ctrader_candles.html`, and opens it in the browser.
 
 Use the sidebar buttons to switch between symbols and timeframes.
 
@@ -108,6 +132,8 @@ scripts/plot_ctrader_candles.py
 src/nds_bot/infrastructure/market_data/ctrader/trendbar_mapper.py
     ↓
 src/nds_bot/domain/market/candle.py
+    ↓
+src/nds_bot/domain/market/z.py
     ↓
 src/nds_bot/infrastructure/visualization/plotly_candles.py
 ```
