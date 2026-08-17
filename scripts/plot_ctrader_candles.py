@@ -380,8 +380,7 @@ def main() -> None:
 
         print(
             f"Historical chunk received: {instrument.symbol} {timeframe.value} "
-            f"chunk={len(chunk_candles)} total={len(series[key])} "
-            f"has_more={bool(response.hasMore)}"
+            f"chunk={len(chunk_candles)} total={len(series[key])}"
         )
 
         if len(series[key]) >= target_candle_count:
