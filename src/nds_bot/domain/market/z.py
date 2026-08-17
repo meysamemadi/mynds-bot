@@ -9,6 +9,7 @@ from enum import StrEnum
 from nds_bot.domain.market.candle import Candle
 
 DEFAULT_Z_REFERENCE_LOOKBACK_BARS = 200
+DEFAULT_Z_BARS_AFTER = 200
 
 
 class ZSelectionMode(StrEnum):
@@ -25,6 +26,30 @@ class ZAnchor:
     reference_high: Decimal
     left_boundary_index: int | None
     all_time_high_mode: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ZCalculationWindow:
+    """Closed candles available after Z for downstream calculations.
+
+    Z itself is intentionally not counted. With bars_after_z=200, the window
+    contains at most Z+1 through Z+200, matching the range convention used by
+    NodeCounterv2.
+    """
+
+    z_anchor: ZAnchor
+    candles: tuple[Candle, ...]
+    first_bar_index: int | None
+    last_bar_index: int | None
+    requested_bars_after_z: int
+
+    @property
+    def available_bars(self) -> int:
+        return len(self.candles)
+
+    @property
+    def complete(self) -> bool:
+        return self.available_bars == self.requested_bars_after_z
 
 
 def find_bull_reference_high(
@@ -107,6 +132,42 @@ def find_bull_z_anchor(
         reference_high=reference_high,
         left_boundary_index=left_boundary_index,
         all_time_high_mode=all_time_high_mode,
+    )
+
+
+def build_z_calculation_window(
+    candles: Sequence[Candle],
+    z_anchor: ZAnchor,
+    *,
+    bars_after_z: int = DEFAULT_Z_BARS_AFTER,
+) -> ZCalculationWindow:
+    if bars_after_z <= 0:
+        raise ValueError("bars_after_z must be positive")
+
+    if z_anchor.bar_index < 0 or z_anchor.bar_index >= len(candles):
+        raise ValueError("Z anchor index is outside the supplied candles")
+
+    anchor_candle = candles[z_anchor.bar_index]
+    if anchor_candle.opened_at != z_anchor.time:
+        raise ValueError("Z anchor index/time does not match supplied candles")
+
+    first_index = z_anchor.bar_index + 1
+    end_exclusive = min(len(candles), first_index + bars_after_z)
+    window_candles = tuple(candles[first_index:end_exclusive])
+
+    if not window_candles:
+        first_bar_index: int | None = None
+        last_bar_index: int | None = None
+    else:
+        first_bar_index = first_index
+        last_bar_index = end_exclusive - 1
+
+    return ZCalculationWindow(
+        z_anchor=z_anchor,
+        candles=window_candles,
+        first_bar_index=first_bar_index,
+        last_bar_index=last_bar_index,
+        requested_bars_after_z=bars_after_z,
     )
 
 
