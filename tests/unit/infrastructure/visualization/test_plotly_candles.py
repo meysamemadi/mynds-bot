@@ -59,6 +59,7 @@ def _trend_candle(
     midpoint: Decimal,
     *,
     close: Decimal | None = None,
+    half_range: Decimal = Decimal("0.50"),
 ) -> Candle:
     opened_at = datetime(2026, 1, 1, tzinfo=UTC) + timedelta(minutes=index)
     close_price = midpoint if close is None else close
@@ -68,8 +69,8 @@ def _trend_candle(
         opened_at=opened_at,
         closed_at=opened_at + timedelta(minutes=1),
         open=midpoint,
-        high=midpoint + Decimal("0.50"),
-        low=midpoint - Decimal("0.50"),
+        high=midpoint + half_range,
+        low=midpoint - half_range,
         close=close_price,
         volume=Decimal("1"),
     )
@@ -192,7 +193,14 @@ def test_build_figure_renders_midpoint_and_close_trends_together() -> None:
         x = Decimal(index)
         midpoint = Decimal(100) + x**3 - Decimal(6) * x**2 + Decimal(9) * x
         close = Decimal(105) - x**3 + Decimal(6) * x**2 - Decimal(9) * x
-        candles.append(_trend_candle(index, midpoint, close=close))
+        candles.append(
+            _trend_candle(
+                index,
+                midpoint,
+                close=close,
+                half_range=Decimal("200"),
+            )
+        )
 
     midpoint_fit = fit_cubic_midpoint_trend(candles)
     close_fit = fit_cubic_close_trend(candles)
