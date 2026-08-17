@@ -32,7 +32,7 @@ class TrendNode:
 
 @dataclass(frozen=True, slots=True)
 class CubicTrendFit:
-    """Least-squares cubic fit over candle midpoint prices.
+    """Least-squares cubic fit over a candle-derived price series.
 
     x is the candle offset from the first supplied candle. The first candle uses
     x=0, the next x=1, and so on. The fitted function is:
@@ -93,8 +93,25 @@ def candle_midpoint(candle: Candle) -> Decimal:
 
 def fit_cubic_midpoint_trend(candles: Sequence[Candle]) -> CubicTrendFit:
     """Fit a degree-3 polynomial to (High + Low) / 2 for each candle."""
+    prices = tuple(candle_midpoint(candle) for candle in candles)
+    return _fit_cubic_trend(candles, prices)
+
+
+def fit_cubic_close_trend(candles: Sequence[Candle]) -> CubicTrendFit:
+    """Fit a degree-3 polynomial to Close for each candle."""
+    prices = tuple(candle.close for candle in candles)
+    return _fit_cubic_trend(candles, prices)
+
+
+def _fit_cubic_trend(
+    candles: Sequence[Candle],
+    prices: Sequence[Decimal],
+) -> CubicTrendFit:
     if len(candles) < CUBIC_COEFFICIENT_COUNT:
         raise ValueError("at least 4 candles are required for a cubic fit")
+
+    if len(prices) != len(candles):
+        raise ValueError("trend prices must match candle count")
 
     first = candles[0]
     if any(
@@ -109,19 +126,19 @@ def fit_cubic_midpoint_trend(candles: Sequence[Candle]) -> CubicTrendFit:
     ):
         raise ValueError("trend candles must be strictly chronological")
 
-    midpoint_prices = tuple(candle_midpoint(candle) for candle in candles)
+    observed_prices = tuple(prices)
     x_values = tuple(Decimal(index) for index in range(len(candles)))
 
     with localcontext() as context:
         context.prec = 50
-        coefficients = _solve_cubic_normal_equations(x_values, midpoint_prices)
+        coefficients = _solve_cubic_normal_equations(x_values, observed_prices)
         fitted_prices = tuple(
             _evaluate_cubic(coefficients, x_value) for x_value in x_values
         )
         mse = sum(
             (observed - fitted) ** 2
             for observed, fitted in zip(
-                midpoint_prices,
+                observed_prices,
                 fitted_prices,
                 strict=True,
             )
@@ -130,7 +147,7 @@ def fit_cubic_midpoint_trend(candles: Sequence[Candle]) -> CubicTrendFit:
     return CubicTrendFit(
         coefficients=coefficients,
         times=tuple(candle.opened_at for candle in candles),
-        midpoint_prices=midpoint_prices,
+        midpoint_prices=observed_prices,
         fitted_prices=fitted_prices,
         mse=mse,
     )
