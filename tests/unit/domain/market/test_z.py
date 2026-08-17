@@ -216,6 +216,30 @@ def test_z_window_reports_incomplete_when_200_future_bars_do_not_exist() -> None
     assert window.last_bar_index == 5
 
 
+def test_z_window_zero_uses_all_closed_candles_after_z() -> None:
+    candles = [
+        _candle(index, high=str(100 + index), low=str(90 + index))
+        for index in range(10)
+    ]
+    z = ZAnchor(
+        bar_index=3,
+        time=candles[3].opened_at,
+        price=candles[3].low,
+        reference_index=4,
+        reference_high=candles[4].high,
+        left_boundary_index=None,
+        all_time_high_mode=True,
+    )
+
+    window = build_z_calculation_window(candles, z, bars_after_z=0)
+
+    assert window.available_bars == 6
+    assert window.complete is True
+    assert window.first_bar_index == 4
+    assert window.last_bar_index == 9
+    assert window.candles == tuple(candles[4:])
+
+
 def test_z_window_rejects_anchor_index_time_mismatch() -> None:
     candles = [
         _candle(0, high="10", low="5"),
