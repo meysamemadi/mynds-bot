@@ -28,6 +28,9 @@ dist/
 # Generated charts
 artifacts/
 
+# Local market-data cache
+data/
+
 # PyCharm
 .idea/
 
