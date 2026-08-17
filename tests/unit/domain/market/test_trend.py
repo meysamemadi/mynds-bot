@@ -21,6 +21,7 @@ def _candle(
     *,
     midpoint: Decimal,
     close: Decimal | None = None,
+    half_range: Decimal = Decimal("1"),
 ) -> Candle:
     opened_at = BASE_TIME + timedelta(minutes=index)
     close_price = midpoint if close is None else close
@@ -30,8 +31,8 @@ def _candle(
         opened_at=opened_at,
         closed_at=opened_at + timedelta(minutes=1),
         open=midpoint,
-        high=midpoint + Decimal("1"),
-        low=midpoint - Decimal("1"),
+        high=midpoint + half_range,
+        low=midpoint - half_range,
         close=close_price,
         volume=Decimal("1"),
     )
@@ -95,6 +96,7 @@ def test_close_cubic_fit_uses_close_prices() -> None:
                 index,
                 midpoint=Decimal("100"),
                 close=close,
+                half_range=Decimal("200"),
             )
         )
 
