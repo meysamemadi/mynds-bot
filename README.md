@@ -25,6 +25,27 @@ The generated Plotly page can switch between:
 
 All eight symbol/timeframe combinations are fetched from cTrader first and then loaded into one browser page, so switching in the chart does not make another API request.
 
+## Historical candle depth
+
+Historical data is downloaded in chunks instead of one oversized cTrader request.
+The default target is 5,000 candles for every symbol/timeframe combination.
+
+Set the target in `.env`:
+
+```dotenv
+CTRADER_HISTORY_CANDLE_COUNT=5000
+```
+
+For example, to request 10,000 candles for each chart series:
+
+```dotenv
+CTRADER_HISTORY_CANDLE_COUNT=10000
+```
+
+The downloader requests up to 1,000 candles per historical chunk and walks backward in time until the target is reached or cTrader has no older bars available. Historical requests are spaced so the application stays below cTrader's historical request rate limit.
+
+Remember that all eight datasets are embedded in the generated Plotly HTML page. Very large values can therefore increase download time, HTML file size, memory usage, and browser rendering cost.
+
 ## Requirements
 
 - Python 3.12
@@ -67,9 +88,9 @@ Common broker names may look like `XAUUSD` for Gold and `US30`/`DJ30` for Dow Jo
 python scripts/plot_ctrader_candles.py
 ```
 
-The script authenticates with cTrader, loads metadata for Gold and Dow, requests 200 candles for each of `M1`, `M3`, `M15`, and `H1`, maps every trendbar to the domain `Candle` model, writes `artifacts/ctrader_candles.html`, and opens it in the browser.
+The script authenticates with cTrader, loads metadata for Gold and Dow, backfills historical candles for each of `M1`, `M3`, `M15`, and `H1`, maps every trendbar to the domain `Candle` model, writes `artifacts/ctrader_candles.html`, and opens it in the browser.
 
-Use the Symbol and Timeframe selectors above the Plotly chart to switch between datasets.
+Use the sidebar buttons to switch between symbols and timeframes.
 
 ## Quality checks
 
