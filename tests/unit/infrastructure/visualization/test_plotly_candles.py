@@ -5,6 +5,7 @@ import pytest
 
 from nds_bot.domain.market.candle import Candle
 from nds_bot.domain.market.timeframe import Timeframe
+from nds_bot.domain.market.trend import fit_cubic_midpoint_trend
 from nds_bot.domain.market.z import ZAnchor, build_z_calculation_window
 from nds_bot.infrastructure.visualization.plotly_candles import (
     build_candlestick_figure,
@@ -85,3 +86,37 @@ def test_build_figure_renders_z_window_end_marker() -> None:
     end_trace = figure.data[2]
     assert list(end_trace.text) == ["Z+1"]
     assert list(end_trace.x) == [second.opened_at]
+
+
+def test_build_figure_renders_cubic_midpoint_trend() -> None:
+    first, second = _sample_candles()
+    candles = [first, second]
+    for index, midpoint in enumerate(
+        (Decimal("6.00"), Decimal("6.50")),
+        start=2,
+    ):
+        opened_at = first.opened_at + timedelta(minutes=index)
+        candles.append(
+            Candle(
+                symbol="GOLD",
+                timeframe=Timeframe.M1,
+                opened_at=opened_at,
+                closed_at=opened_at + timedelta(minutes=1),
+                open=midpoint,
+                high=midpoint + Decimal("0.50"),
+                low=midpoint - Decimal("0.50"),
+                close=midpoint,
+                volume=Decimal("1"),
+            )
+        )
+
+    trend_fit = fit_cubic_midpoint_trend(candles)
+    figure = build_candlestick_figure(candles, trend_fit=trend_fit)
+
+    assert len(figure.data) == 2
+    trend_trace = figure.data[1]
+    assert trend_trace.name == "Cubic midpoint trend"
+    assert list(trend_trace.x) == list(trend_fit.times)
+    assert list(trend_trace.y) == pytest.approx(
+        [float(value) for value in trend_fit.fitted_prices]
+    )
