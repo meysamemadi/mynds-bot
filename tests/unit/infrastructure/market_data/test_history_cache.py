@@ -42,6 +42,26 @@ def test_cache_round_trip_preserves_decimal_candles(tmp_path) -> None:
     assert loaded[1].close == Decimal("10.25")
 
 
+def test_cache_save_can_replace_existing_series(tmp_path) -> None:
+    cache = CandleHistoryCache(tmp_path)
+
+    cache.save(
+        symbol="GOLD",
+        timeframe=Timeframe.M1,
+        candles=[_candle(0, close="10.10")],
+    )
+    cache.save(
+        symbol="GOLD",
+        timeframe=Timeframe.M1,
+        candles=[_candle(0, close="10.90"), _candle(1)],
+    )
+
+    loaded = cache.load(symbol="GOLD", timeframe=Timeframe.M1)
+
+    assert len(loaded) == 2
+    assert loaded[0].close == Decimal("10.90")
+
+
 def test_merge_replaces_same_timestamp_with_newer_value_and_keeps_order() -> None:
     original = [_candle(0), _candle(1, close="10.10")]
     refreshed = [_candle(1, close="10.50"), _candle(2)]
