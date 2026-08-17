@@ -9,9 +9,13 @@ cTrader Open API
       ↓
 Historical Trendbars
       ↓
+Local History Cache
+      ↓
 Domain Candle
       ↓
 Bull Z (NodeCounterv2 contract)
+      ↓
+Z Calculation Window (Z+1 ... Z+200)
       ↓
 Plotly Candlestick Chart
 ```
@@ -25,7 +29,7 @@ The generated Plotly page can switch between:
 - Symbols: `GOLD`, `DOW`
 - Timeframes: `M1`, `M3`, `M15`, `H1`
 
-All eight symbol/timeframe combinations are fetched from cTrader first and then loaded into one browser page, so switching in the chart does not make another API request.
+All eight symbol/timeframe combinations are loaded into one browser page, so switching in the chart does not make another API request.
 
 ## Bull Z contract
 
@@ -49,26 +53,49 @@ The domain also contains NodeCounterv2-compatible manual-time Z resolution, but 
 
 Because the left-boundary search can scan to the beginning of loaded history, increasing historical depth can change an ATH-mode result if an older higher High becomes available.
 
-## Historical candle depth
+## Z calculation window
 
-Historical data is downloaded in chunks instead of one oversized cTrader request.
+Downstream calculations now use an explicit bounded window after Z.
+The default is 200 closed candles after Z:
+
+```text
+Z | Z+1 ... Z+200
+```
+
+Z itself is not counted. This matches the range convention used by NodeCounterv2.
+If fewer than 200 closed candles exist after Z, the window is marked incomplete and contains only the available candles.
+
+The chart shows:
+
+- the gold `Z` marker at the anchor;
+- a `Z+200` end marker when the full window is available;
+- or `Z+N` when only N post-Z candles are currently available.
+
+The top bar also shows the current window status.
+
+## Historical candle depth and cache
+
 The default target is 5,000 candles for every symbol/timeframe combination.
-
 Set the target in `.env`:
 
 ```dotenv
 CTRADER_HISTORY_CANDLE_COUNT=5000
 ```
 
-For example, to request 10,000 candles for each chart series:
+Historical data is downloaded in chunks of up to 1,000 candles.
+The first run builds a local cache under:
 
-```dotenv
-CTRADER_HISTORY_CANDLE_COUNT=10000
+```text
+data/history/
 ```
 
-The downloader requests up to 1,000 candles per historical chunk and walks backward in time until the target is reached or cTrader has no older bars available. Historical requests are spaced so the application stays below cTrader's historical request rate limit.
+Cache files are ignored by Git.
 
-Remember that all eight datasets are embedded in the generated Plotly HTML page. Very large values can therefore increase download time, HTML file size, memory usage, and browser rendering cost.
+On later runs, each series is loaded from the local cache first and normally needs only one recent cTrader refresh chunk. If the cache is old enough that the new chunk does not overlap it, the downloader automatically walks backward until the gap is bridged before using the merged history.
+
+This keeps the Z history continuous while making repeated runs much faster than downloading all 5,000 candles for all eight chart series every time.
+
+Remember that all eight datasets are embedded in the generated Plotly HTML page. Very large history targets can therefore increase HTML size, memory usage, and browser rendering cost.
 
 ## Requirements
 
@@ -112,7 +139,7 @@ Common broker names may look like `XAUUSD` for Gold and `US30`/`DJ30` for Dow Jo
 python scripts/plot_ctrader_candles.py
 ```
 
-The script authenticates with cTrader, loads metadata for Gold and Dow, backfills historical candles for each of `M1`, `M3`, `M15`, and `H1`, maps every trendbar to the domain `Candle` model, calculates Bull Z on closed candles, writes `artifacts/ctrader_candles.html`, and opens it in the browser.
+The script authenticates with cTrader, loads/refreshes historical candles, maps trendbars to the domain `Candle` model, calculates Bull Z on closed candles, builds the bounded post-Z calculation window, writes `artifacts/ctrader_candles.html`, and opens it in the browser.
 
 Use the sidebar buttons to switch between symbols and timeframes.
 
@@ -130,6 +157,8 @@ python -m mypy src
 scripts/plot_ctrader_candles.py
     ↓
 src/nds_bot/infrastructure/market_data/ctrader/trendbar_mapper.py
+    ↓
+src/nds_bot/infrastructure/market_data/history_cache.py
     ↓
 src/nds_bot/domain/market/candle.py
     ↓
