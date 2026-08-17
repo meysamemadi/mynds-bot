@@ -5,7 +5,10 @@ import pytest
 
 from nds_bot.domain.market.candle import Candle
 from nds_bot.domain.market.timeframe import Timeframe
-from nds_bot.domain.market.trend import fit_cubic_midpoint_trend
+from nds_bot.domain.market.trend import (
+    fit_cubic_close_trend,
+    fit_cubic_midpoint_trend,
+)
 from nds_bot.domain.market.z import ZAnchor, build_z_calculation_window
 from nds_bot.infrastructure.visualization.plotly_candles import (
     build_candlestick_figure,
@@ -51,8 +54,14 @@ def _z_anchor(first: Candle, second: Candle) -> ZAnchor:
     )
 
 
-def _trend_candle(index: int, midpoint: Decimal) -> Candle:
+def _trend_candle(
+    index: int,
+    midpoint: Decimal,
+    *,
+    close: Decimal | None = None,
+) -> Candle:
     opened_at = datetime(2026, 1, 1, tzinfo=UTC) + timedelta(minutes=index)
+    close_price = midpoint if close is None else close
     return Candle(
         symbol="GOLD",
         timeframe=Timeframe.M1,
@@ -61,7 +70,7 @@ def _trend_candle(index: int, midpoint: Decimal) -> Candle:
         open=midpoint,
         high=midpoint + Decimal("0.50"),
         low=midpoint - Decimal("0.50"),
-        close=midpoint,
+        close=close_price,
         volume=Decimal("1"),
     )
 
@@ -137,7 +146,7 @@ def test_build_figure_renders_cubic_midpoint_trend() -> None:
     )
 
 
-def test_build_figure_renders_maximum_and_minimum_node_types() -> None:
+def test_node_markers_have_no_text_and_show_derivative_sign() -> None:
     candles = []
     for index in range(7):
         x = Decimal(index)
@@ -147,11 +156,52 @@ def test_build_figure_renders_maximum_and_minimum_node_types() -> None:
     trend_fit = fit_cubic_midpoint_trend(candles)
     figure = build_candlestick_figure(candles, trend_fit=trend_fit)
 
-    assert len(figure.data) == 3
-    node_trace = figure.data[2]
-    assert node_trace.name == "Trend nodes"
-    assert list(node_trace.text) == ["N1 MAX", "N2 MIN"]
-    assert list(node_trace.x) == [
+    assert len(figure.data) == 4
+    first_derivative_trace = figure.data[2]
+    second_derivative_trace = figure.data[3]
+
+    assert first_derivative_trace.mode == "markers"
+    assert first_derivative_trace.text is None
+    assert first_derivative_trace.marker.symbol == "circle"
+    assert first_derivative_trace.marker.color == "#ffd700"
+    assert list(first_derivative_trace.x) == [
         candles[1].opened_at,
         candles[3].opened_at,
     ]
+
+    assert second_derivative_trace.mode == "markers"
+    assert second_derivative_trace.text is None
+    assert second_derivative_trace.marker.symbol == "circle"
+    assert list(second_derivative_trace.marker.color) == [
+        "#ef5350",
+        "#26a69a",
+    ]
+    assert all(
+        upper > lower
+        for upper, lower in zip(
+            second_derivative_trace.y,
+            first_derivative_trace.y,
+            strict=True,
+        )
+    )
+
+
+def test_build_figure_renders_midpoint_and_close_trends_together() -> None:
+    candles = []
+    for index in range(7):
+        x = Decimal(index)
+        midpoint = Decimal(100) + x**3 - Decimal(6) * x**2 + Decimal(9) * x
+        close = Decimal(105) - x**3 + Decimal(6) * x**2 - Decimal(9) * x
+        candles.append(_trend_candle(index, midpoint, close=close))
+
+    midpoint_fit = fit_cubic_midpoint_trend(candles)
+    close_fit = fit_cubic_close_trend(candles)
+    figure = build_candlestick_figure(
+        candles,
+        trend_fit=midpoint_fit,
+        close_trend_fit=close_fit,
+    )
+
+    trace_names = [trace.name for trace in figure.data]
+    assert "Cubic midpoint trend" in trace_names
+    assert "Cubic close trend" in trace_names
