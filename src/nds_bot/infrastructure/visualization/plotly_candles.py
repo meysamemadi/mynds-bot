@@ -11,7 +11,7 @@ import plotly.io as pio
 
 from nds_bot.domain.market.candle import Candle
 from nds_bot.domain.market.timeframe import Timeframe
-from nds_bot.domain.market.z import ZAnchor
+from nds_bot.domain.market.z import ZAnchor, ZCalculationWindow
 
 
 def build_candlestick_figure(
@@ -19,12 +19,12 @@ def build_candlestick_figure(
     *,
     title: str | None = None,
     z_anchor: ZAnchor | None = None,
+    z_window: ZCalculationWindow | None = None,
 ) -> go.Figure:
     if not candles:
         raise ValueError("candles cannot be empty")
 
     first = candles[0]
-
     if any(
         candle.symbol != first.symbol or candle.timeframe is not first.timeframe
         for candle in candles
@@ -41,19 +41,15 @@ def build_candlestick_figure(
     )
 
     if z_anchor is not None:
-        figure.add_trace(
-            _build_z_trace(
-                candles,
-                z_anchor,
-                visible=True,
-            )
-        )
+        figure.add_trace(_build_z_trace(candles, z_anchor, visible=True))
+
+    if z_window is not None and z_window.candles:
+        figure.add_trace(_build_z_window_end_trace(z_window, visible=True))
 
     _apply_layout(
         figure,
         title=title or f"{first.symbol} — {first.timeframe.value}",
     )
-
     return figure
 
 
@@ -64,12 +60,12 @@ def write_switchable_candlestick_chart(
     initial_symbol: str,
     initial_timeframe: Timeframe,
     z_anchors: Mapping[tuple[str, Timeframe], ZAnchor] | None = None,
+    z_windows: Mapping[tuple[str, Timeframe], ZCalculationWindow] | None = None,
 ) -> Path:
     if not series:
         raise ValueError("series cannot be empty")
 
     initial_key = (initial_symbol, initial_timeframe)
-
     if initial_key not in series:
         raise ValueError("initial symbol/timeframe combination is not available")
 
@@ -77,16 +73,11 @@ def write_switchable_candlestick_chart(
     trace_keys: list[str] = []
 
     for (symbol, timeframe), candles in series.items():
-        _validate_series(
-            symbol=symbol,
-            timeframe=timeframe,
-            candles=candles,
-        )
-
-        key = _selection_key(symbol, timeframe)
+        _validate_series(symbol=symbol, timeframe=timeframe, candles=candles)
+        selection_key = _selection_key(symbol, timeframe)
         is_visible = (symbol, timeframe) == initial_key
 
-        trace_keys.append(key)
+        trace_keys.append(selection_key)
         figure.add_trace(
             _build_trace(
                 candles,
@@ -98,13 +89,17 @@ def write_switchable_candlestick_chart(
         if z_anchors is not None:
             z_anchor = z_anchors.get((symbol, timeframe))
             if z_anchor is not None:
-                trace_keys.append(key)
+                trace_keys.append(selection_key)
                 figure.add_trace(
-                    _build_z_trace(
-                        candles,
-                        z_anchor,
-                        visible=is_visible,
-                    )
+                    _build_z_trace(candles, z_anchor, visible=is_visible)
+                )
+
+        if z_windows is not None:
+            z_window = z_windows.get((symbol, timeframe))
+            if z_window is not None and z_window.candles:
+                trace_keys.append(selection_key)
+                figure.add_trace(
+                    _build_z_window_end_trace(z_window, visible=is_visible)
                 )
 
     initial_title = f"{initial_symbol} — {initial_timeframe.value}"
@@ -134,7 +129,6 @@ def write_switchable_candlestick_chart(
         )
         for symbol in symbols
     )
-
     timeframe_buttons = "".join(
         _selector_button_html(
             label=timeframe.value,
@@ -145,15 +139,17 @@ def write_switchable_candlestick_chart(
         for timeframe in timeframes
     )
 
+    window_meta = _window_metadata(series, z_windows)
     trace_keys_json = json.dumps(trace_keys)
+    window_meta_json = json.dumps(window_meta)
     initial_symbol_json = json.dumps(initial_symbol)
     initial_timeframe_json = json.dumps(initial_timeframe.value)
 
     document = f"""<!doctype html>
-<html lang=\"en\">
+<html lang="en">
 <head>
-  <meta charset=\"utf-8\">
-  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{escape(initial_title)} — cTrader</title>
   <style>
     :root {{
@@ -165,13 +161,11 @@ def write_switchable_candlestick_chart(
       --text: #d1d4dc;
       --muted: #787b86;
       --active: #2962ff;
-      --active-hover: #1e53e5;
       --positive: #26a69a;
+      --gold: #ffd700;
     }}
 
-    * {{
-      box-sizing: border-box;
-    }}
+    * {{ box-sizing: border-box; }}
 
     html,
     body {{
@@ -181,12 +175,10 @@ def write_switchable_candlestick_chart(
       overflow: hidden;
       background: var(--bg);
       color: var(--text);
-      font-family: Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }}
 
-    button {{
-      font: inherit;
-    }}
+    button {{ font: inherit; }}
 
     .app-shell {{
       display: grid;
@@ -237,9 +229,7 @@ def write_switchable_candlestick_chart(
       padding: 14px 10px 20px;
     }}
 
-    .sidebar-section + .sidebar-section {{
-      margin-top: 22px;
-    }}
+    .sidebar-section + .sidebar-section {{ margin-top: 22px; }}
 
     .section-title {{
       margin: 0 8px 8px;
@@ -268,9 +258,7 @@ def write_switchable_candlestick_chart(
       transition: background 120ms ease, border-color 120ms ease;
     }}
 
-    .selector-button:hover {{
-      background: var(--panel-hover);
-    }}
+    .selector-button:hover {{ background: var(--panel-hover); }}
 
     .selector-button.active {{
       border-color: rgba(41, 98, 255, 0.48);
@@ -278,9 +266,7 @@ def write_switchable_candlestick_chart(
       color: #fff;
     }}
 
-    .timeframe-list {{
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }}
+    .timeframe-list {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
 
     .timeframe-list .selector-button {{
       text-align: center;
@@ -308,6 +294,7 @@ def write_switchable_candlestick_chart(
       flex: 0 0 52px;
       align-items: center;
       justify-content: space-between;
+      gap: 16px;
       padding: 0 16px;
       border-bottom: 1px solid var(--border);
       background: var(--panel);
@@ -332,12 +319,26 @@ def write_switchable_candlestick_chart(
       font-weight: 600;
     }}
 
+    .topbar-status {{
+      display: flex;
+      min-width: 0;
+      align-items: center;
+      gap: 14px;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+
+    #z-window-status {{
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }}
+
     .source-status {{
       display: flex;
       align-items: center;
       gap: 7px;
-      color: var(--muted);
-      font-size: 12px;
+      white-space: nowrap;
     }}
 
     .status-dot {{
@@ -355,11 +356,7 @@ def write_switchable_candlestick_chart(
       position: relative;
     }}
 
-    #candlestick-chart {{
-      width: 100% !important;
-      height: 100% !important;
-    }}
-
+    #candlestick-chart,
     #candlestick-chart .plot-container,
     #candlestick-chart .svg-container {{
       width: 100% !important;
@@ -367,73 +364,67 @@ def write_switchable_candlestick_chart(
     }}
 
     @media (max-width: 720px) {{
-      .app-shell {{
-        grid-template-columns: 150px minmax(0, 1fr);
-      }}
-
-      .brand {{
-        padding: 0 10px;
-      }}
-
-      .source-status span:last-child {{
-        display: none;
-      }}
+      .app-shell {{ grid-template-columns: 150px minmax(0, 1fr); }}
+      .brand {{ padding: 0 10px; }}
+      #z-window-status {{ display: none; }}
+      .source-status span:last-child {{ display: none; }}
     }}
   </style>
 </head>
 <body>
-  <main class=\"app-shell\">
-    <aside class=\"sidebar\">
-      <div class=\"brand\">
-        <span class=\"brand-mark\">NDS</span>
+  <main class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-mark">NDS</span>
         <span>Market Chart</span>
       </div>
 
-      <div class=\"sidebar-content\">
-        <section class=\"sidebar-section\">
-          <h2 class=\"section-title\">Symbols</h2>
-          <div class=\"selector-list\" id=\"symbol-list\">
-            {symbol_buttons}
-          </div>
+      <div class="sidebar-content">
+        <section class="sidebar-section">
+          <h2 class="section-title">Symbols</h2>
+          <div class="selector-list" id="symbol-list">{symbol_buttons}</div>
         </section>
 
-        <section class=\"sidebar-section\">
-          <h2 class=\"section-title\">Timeframes</h2>
-          <div class=\"selector-list timeframe-list\" id=\"timeframe-list\">
+        <section class="sidebar-section">
+          <h2 class="section-title">Timeframes</h2>
+          <div class="selector-list timeframe-list" id="timeframe-list">
             {timeframe_buttons}
           </div>
         </section>
       </div>
 
-      <div class=\"sidebar-footer\">cTrader historical trendbars</div>
+      <div class="sidebar-footer">cTrader historical trendbars</div>
     </aside>
 
-    <section class=\"workspace\">
-      <header class=\"topbar\">
-        <div class=\"instrument-title\">
-          <span id=\"active-symbol\">{escape(initial_symbol)}</span>
-          <span id=\"active-timeframe\">{escape(initial_timeframe.value)}</span>
+    <section class="workspace">
+      <header class="topbar">
+        <div class="instrument-title">
+          <span id="active-symbol">{escape(initial_symbol)}</span>
+          <span id="active-timeframe">{escape(initial_timeframe.value)}</span>
         </div>
-        <div class=\"source-status\">
-          <span class=\"status-dot\"></span>
-          <span>cTrader data</span>
+        <div class="topbar-status">
+          <span id="z-window-status"></span>
+          <span class="source-status">
+            <span class="status-dot"></span>
+            <span>cTrader data</span>
+          </span>
         </div>
       </header>
 
-      <div class=\"chart-container\">
-        {chart_div}
-      </div>
+      <div class="chart-container">{chart_div}</div>
     </section>
   </main>
 
   <script>
     const chartId = "candlestick-chart";
     const traceKeys = {trace_keys_json};
+    const windowMeta = {window_meta_json};
     let selectedSymbol = {initial_symbol_json};
     let selectedTimeframe = {initial_timeframe_json};
 
     const activeSymbol = document.getElementById("active-symbol");
     const activeTimeframe = document.getElementById("active-timeframe");
+    const zWindowStatus = document.getElementById("z-window-status");
     const symbolButtons = Array.from(document.querySelectorAll("[data-symbol]"));
     const timeframeButtons = Array.from(
       document.querySelectorAll("[data-timeframe]")
@@ -458,6 +449,9 @@ def write_switchable_candlestick_chart(
       setActiveButton(timeframeButtons, selectedTimeframe, "timeframe");
       activeSymbol.textContent = selectedSymbol;
       activeTimeframe.textContent = selectedTimeframe;
+
+      const meta = windowMeta[selectedKey];
+      zWindowStatus.textContent = meta ? meta.label : "Z window unavailable";
       document.title = `${{selectedSymbol}} — ${{selectedTimeframe}} — cTrader`;
 
       Promise.all(updates).then(() => {{
@@ -486,6 +480,7 @@ def write_switchable_candlestick_chart(
     window.addEventListener("resize", () => {{
       Plotly.Plots.resize(document.getElementById(chartId));
     }});
+    updateChart();
   </script>
 </body>
 </html>
@@ -547,7 +542,7 @@ def _build_z_trace(
         raise ValueError("Z anchor candle is not present in chart candles")
 
     candle_size = z_candle.high - z_candle.low
-    point = Decimal(1).scaleb(z_anchor.price.as_tuple().exponent)
+    point = _decimal_point(z_anchor.price)
     offset = max(
         candle_size * Decimal("0.35"),
         Decimal(15) * point,
@@ -582,11 +577,84 @@ def _build_z_trace(
     )
 
 
-def _apply_layout(
-    figure: go.Figure,
+def _build_z_window_end_trace(
+    z_window: ZCalculationWindow,
     *,
-    title: str,
-) -> None:
+    visible: bool,
+) -> go.Scatter:
+    if not z_window.candles:
+        raise ValueError("Z calculation window cannot be empty")
+
+    end_candle = z_window.candles[-1]
+    candle_size = end_candle.high - end_candle.low
+    point = _decimal_point(end_candle.high)
+    offset = max(
+        candle_size * Decimal("0.25"),
+        Decimal(10) * point,
+    )
+    draw_price = end_candle.high + offset
+    label = f"Z+{z_window.available_bars}"
+    status = "complete" if z_window.complete else "incomplete"
+
+    return go.Scatter(
+        x=[end_candle.opened_at],
+        y=[float(draw_price)],
+        mode="markers+text",
+        marker={
+            "symbol": "diamond-open",
+            "size": 8,
+            "color": "#ffd700",
+        },
+        text=[label],
+        textposition="top center",
+        textfont={"color": "#c8a900", "size": 10},
+        hovertext=[
+            f"{label}<br>Z calculation window: {status}"
+            f"<br>Available bars: {z_window.available_bars}"
+            f"<br>Requested bars: {z_window.requested_bars_after_z}"
+        ],
+        hoverinfo="text",
+        name="Z window end",
+        visible=visible,
+        showlegend=False,
+    )
+
+
+def _decimal_point(value: Decimal) -> Decimal:
+    exponent = value.as_tuple().exponent
+    if not isinstance(exponent, int):
+        raise ValueError("price must be finite")
+    return Decimal(1).scaleb(exponent)
+
+
+def _window_metadata(
+    series: Mapping[tuple[str, Timeframe], Sequence[Candle]],
+    z_windows: Mapping[tuple[str, Timeframe], ZCalculationWindow] | None,
+) -> dict[str, dict[str, str | int | bool]]:
+    result: dict[str, dict[str, str | int | bool]] = {}
+    if z_windows is None:
+        return result
+
+    for symbol, timeframe in series:
+        window = z_windows.get((symbol, timeframe))
+        if window is None:
+            continue
+
+        status = "complete" if window.complete else "incomplete"
+        result[_selection_key(symbol, timeframe)] = {
+            "available": window.available_bars,
+            "requested": window.requested_bars_after_z,
+            "complete": window.complete,
+            "label": (
+                f"Z window: {window.available_bars}/"
+                f"{window.requested_bars_after_z} bars ({status})"
+            ),
+        }
+
+    return result
+
+
+def _apply_layout(figure: go.Figure, *, title: str) -> None:
     figure.update_layout(
         title=title,
         xaxis_title="Time (UTC)",
