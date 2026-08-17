@@ -16,11 +16,22 @@ class Settings:
     ctrader_account_id: int | None
     ctrader_gold_symbol_id: int | None
     ctrader_dow_symbol_id: int | None
+    ctrader_history_candle_count: int
 
 
 def _optional_int(name: str) -> int | None:
     value = getenv(name)
     return int(value) if value else None
+
+
+def _positive_int(name: str, default: int) -> int:
+    value = getenv(name)
+    parsed = int(value) if value else default
+
+    if parsed <= 0:
+        raise RuntimeError(f"{name} must be greater than zero")
+
+    return parsed
 
 
 def load_settings() -> Settings:
@@ -45,4 +56,8 @@ def load_settings() -> Settings:
         ctrader_account_id=_optional_int("CTRADER_ACCOUNT_ID"),
         ctrader_gold_symbol_id=_optional_int("CTRADER_GOLD_SYMBOL_ID"),
         ctrader_dow_symbol_id=_optional_int("CTRADER_DOW_SYMBOL_ID"),
+        ctrader_history_candle_count=_positive_int(
+            "CTRADER_HISTORY_CANDLE_COUNT",
+            5000,
+        ),
     )
