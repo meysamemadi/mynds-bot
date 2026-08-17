@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
+from decimal import Decimal
 from html import escape
 from pathlib import Path
 
@@ -42,6 +43,7 @@ def build_candlestick_figure(
     if z_anchor is not None:
         figure.add_trace(
             _build_z_trace(
+                candles,
                 z_anchor,
                 visible=True,
             )
@@ -99,6 +101,7 @@ def write_switchable_candlestick_chart(
                 trace_keys.append(key)
                 figure.add_trace(
                     _build_z_trace(
+                        candles,
                         z_anchor,
                         visible=is_visible,
                     )
@@ -531,10 +534,26 @@ def _build_trace(
 
 
 def _build_z_trace(
+    candles: Sequence[Candle],
     z_anchor: ZAnchor,
     *,
     visible: bool,
 ) -> go.Scatter:
+    z_candle = next(
+        (candle for candle in candles if candle.opened_at == z_anchor.time),
+        None,
+    )
+    if z_candle is None:
+        raise ValueError("Z anchor candle is not present in chart candles")
+
+    candle_size = z_candle.high - z_candle.low
+    point = Decimal(1).scaleb(z_anchor.price.as_tuple().exponent)
+    offset = max(
+        candle_size * Decimal("0.35"),
+        Decimal(15) * point,
+    )
+    draw_price = z_anchor.price - offset
+
     mode = "ATH" if z_anchor.all_time_high_mode else "bounded"
     boundary = (
         "none"
@@ -550,10 +569,10 @@ def _build_z_trace(
 
     return go.Scatter(
         x=[z_anchor.time],
-        y=[float(z_anchor.price)],
+        y=[float(draw_price)],
         mode="text",
         text=["Z"],
-        textposition="bottom center",
+        textposition="middle center",
         textfont={"color": "#ffd700", "size": 14},
         hovertext=[hover_text],
         hoverinfo="text",
