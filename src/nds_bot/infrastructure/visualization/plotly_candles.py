@@ -10,12 +10,14 @@ import plotly.io as pio
 
 from nds_bot.domain.market.candle import Candle
 from nds_bot.domain.market.timeframe import Timeframe
+from nds_bot.domain.market.z import ZAnchor
 
 
 def build_candlestick_figure(
     candles: Sequence[Candle],
     *,
     title: str | None = None,
+    z_anchor: ZAnchor | None = None,
 ) -> go.Figure:
     if not candles:
         raise ValueError("candles cannot be empty")
@@ -28,15 +30,22 @@ def build_candlestick_figure(
     ):
         raise ValueError("all candles must use the same symbol and timeframe")
 
-    figure = go.Figure(
-        data=[
-            _build_trace(
-                candles,
-                name=f"{first.symbol} {first.timeframe.value}",
+    figure = go.Figure()
+    figure.add_trace(
+        _build_trace(
+            candles,
+            name=f"{first.symbol} {first.timeframe.value}",
+            visible=True,
+        )
+    )
+
+    if z_anchor is not None:
+        figure.add_trace(
+            _build_z_trace(
+                z_anchor,
                 visible=True,
             )
-        ]
-    )
+        )
 
     _apply_layout(
         figure,
@@ -52,6 +61,7 @@ def write_switchable_candlestick_chart(
     output_path: Path,
     initial_symbol: str,
     initial_timeframe: Timeframe,
+    z_anchors: Mapping[tuple[str, Timeframe], ZAnchor] | None = None,
 ) -> Path:
     if not series:
         raise ValueError("series cannot be empty")
@@ -72,15 +82,27 @@ def write_switchable_candlestick_chart(
         )
 
         key = _selection_key(symbol, timeframe)
-        trace_keys.append(key)
+        is_visible = (symbol, timeframe) == initial_key
 
+        trace_keys.append(key)
         figure.add_trace(
             _build_trace(
                 candles,
                 name=f"{symbol} {timeframe.value}",
-                visible=(symbol, timeframe) == initial_key,
+                visible=is_visible,
             )
         )
+
+        if z_anchors is not None:
+            z_anchor = z_anchors.get((symbol, timeframe))
+            if z_anchor is not None:
+                trace_keys.append(key)
+                figure.add_trace(
+                    _build_z_trace(
+                        z_anchor,
+                        visible=is_visible,
+                    )
+                )
 
     initial_title = f"{initial_symbol} — {initial_timeframe.value}"
     _apply_workspace_layout(figure)
@@ -505,6 +527,39 @@ def _build_trace(
         decreasing_line_color="#ef5350",
         increasing_fillcolor="#26a69a",
         decreasing_fillcolor="#ef5350",
+    )
+
+
+def _build_z_trace(
+    z_anchor: ZAnchor,
+    *,
+    visible: bool,
+) -> go.Scatter:
+    mode = "ATH" if z_anchor.all_time_high_mode else "bounded"
+    boundary = (
+        "none"
+        if z_anchor.left_boundary_index is None
+        else str(z_anchor.left_boundary_index)
+    )
+    hover_text = (
+        f"Z<br>Price: {z_anchor.price}"
+        f"<br>Reference High: {z_anchor.reference_high}"
+        f"<br>Mode: {mode}"
+        f"<br>Left boundary index: {boundary}"
+    )
+
+    return go.Scatter(
+        x=[z_anchor.time],
+        y=[float(z_anchor.price)],
+        mode="text",
+        text=["Z"],
+        textposition="bottom center",
+        textfont={"color": "#ffd700", "size": 14},
+        hovertext=[hover_text],
+        hoverinfo="text",
+        name="Z",
+        visible=visible,
+        showlegend=False,
     )
 
 
