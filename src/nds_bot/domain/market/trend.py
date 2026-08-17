@@ -49,12 +49,7 @@ class CubicTrendFit:
 
     def evaluate(self, x: int | Decimal) -> Decimal:
         x_value = Decimal(x)
-        return (
-            self.a0
-            + self.a1 * x_value
-            + self.a2 * x_value**2
-            + self.a3 * x_value**3
-        )
+        return _evaluate_cubic(self.coefficients, x_value)
 
 
 def candle_midpoint(candle: Candle) -> Decimal:
@@ -110,21 +105,36 @@ def _solve_cubic_normal_equations(
     x_values: Sequence[Decimal],
     y_values: Sequence[Decimal],
 ) -> tuple[Decimal, Decimal, Decimal, Decimal]:
-    matrix: list[list[Decimal]] = []
+    matrix = [
+        [Decimal(0) for _ in range(CUBIC_COEFFICIENT_COUNT + 1)]
+        for _ in range(CUBIC_COEFFICIENT_COUNT)
+    ]
 
-    for row_power in range(CUBIC_COEFFICIENT_COUNT):
-        row = [
-            sum(x ** (row_power + column_power) for x in x_values)
-            for column_power in range(CUBIC_COEFFICIENT_COUNT)
-        ]
-        rhs = sum(
-            y * x**row_power
-            for x, y in zip(x_values, y_values, strict=True)
-        )
-        matrix.append([*row, rhs])
+    for x_value, y_value in zip(x_values, y_values, strict=True):
+        basis = _cubic_basis(x_value)
+
+        for row_index in range(CUBIC_COEFFICIENT_COUNT):
+            for column_index in range(CUBIC_COEFFICIENT_COUNT):
+                matrix[row_index][column_index] += (
+                    basis[row_index] * basis[column_index]
+                )
+
+            matrix[row_index][-1] += basis[row_index] * y_value
 
     solution = _gaussian_elimination(matrix)
     return (solution[0], solution[1], solution[2], solution[3])
+
+
+def _cubic_basis(
+    x_value: Decimal,
+) -> tuple[Decimal, Decimal, Decimal, Decimal]:
+    x_squared = x_value * x_value
+    return (
+        Decimal(1),
+        x_value,
+        x_squared,
+        x_squared * x_value,
+    )
 
 
 def _gaussian_elimination(matrix: list[list[Decimal]]) -> list[Decimal]:
@@ -174,4 +184,4 @@ def _evaluate_cubic(
     x_value: Decimal,
 ) -> Decimal:
     a0, a1, a2, a3 = coefficients
-    return a0 + a1 * x_value + a2 * x_value**2 + a3 * x_value**3
+    return ((a3 * x_value + a2) * x_value + a1) * x_value + a0
