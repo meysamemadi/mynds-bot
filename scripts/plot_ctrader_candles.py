@@ -38,7 +38,8 @@ from nds_bot.infrastructure.visualization.plotly_candles import (
 
 AUTH_TIMEOUT_SECONDS = 20
 MARKET_DATA_TIMEOUT_SECONDS = 60
-TREND_BAR_COUNT = 200
+HISTORICAL_CHUNK_SIZE = 1000
+HISTORICAL_REQUEST_DELAY_SECONDS = 0.25
 
 TIMEFRAMES = (
     Timeframe.M1,
@@ -103,6 +104,7 @@ def main() -> None:
         ),
     )
 
+    target_candle_count = settings.ctrader_history_candle_count
     account_id = settings.ctrader_account_id
     host = select_host(settings.ctrader_environment)
 
@@ -112,7 +114,7 @@ def main() -> None:
         TcpProtocol,
     )
 
-    pending_requests = deque(
+    pending_series = deque(
         (instrument, timeframe)
         for instrument in instruments
         for timeframe in TIMEFRAMES
@@ -121,6 +123,7 @@ def main() -> None:
     series: dict[tuple[str, Timeframe], list[Candle]] = {}
     symbol_digits: dict[int, int] = {}
     active_request: tuple[ChartInstrument, Timeframe] | None = None
+    active_to_timestamp_ms: int | None = None
     shutdown_started = False
 
     def stop_reactor() -> None:
@@ -192,38 +195,102 @@ def main() -> None:
 
         print("Symbol metadata request sent for GOLD and DOW")
 
+    def finish_active_series(
+        connected_client: Client,
+        *,
+        history_exhausted: bool = False,
+    ) -> None:
+        nonlocal active_request
+        nonlocal active_to_timestamp_ms
+
+        if active_request is None:
+            raise RuntimeError("No active historical series to finish")
+
+        instrument, timeframe = active_request
+        key = (instrument.symbol, timeframe)
+        candles = series[key]
+
+        if not candles:
+            raise RuntimeError(
+                f"No trendbars returned for {instrument.symbol} {timeframe.value}"
+            )
+
+        suffix = " (history exhausted)" if history_exhausted else ""
+        print(
+            f"Series ready: {instrument.symbol} {timeframe.value} "
+            f"({len(candles)} candles){suffix}"
+        )
+
+        active_request = None
+        active_to_timestamp_ms = None
+
+        reactor.callLater(
+            HISTORICAL_REQUEST_DELAY_SECONDS,
+            send_next_trendbars_request,
+            connected_client,
+        )
+
     def send_next_trendbars_request(connected_client: Client) -> None:
         nonlocal active_request
+        nonlocal active_to_timestamp_ms
 
-        if not pending_requests:
-            active_request = None
-            schedule_shutdown()
+        if active_request is None:
+            if not pending_series:
+                schedule_shutdown()
+                return
+
+            active_request = pending_series.popleft()
+            active_to_timestamp_ms = int(datetime.now(UTC).timestamp() * 1000)
+
+            instrument, timeframe = active_request
+            series[(instrument.symbol, timeframe)] = []
+
+            print()
+            print(
+                f"Loading {instrument.symbol} {timeframe.value}: "
+                f"target={target_candle_count} candles"
+            )
+
+        if active_to_timestamp_ms is None:
+            raise RuntimeError("Historical cursor is not initialized")
+
+        instrument, timeframe = active_request
+        key = (instrument.symbol, timeframe)
+        current_candles = series[key]
+        remaining = target_candle_count - len(current_candles)
+
+        if remaining <= 0:
+            finish_active_series(connected_client)
             return
 
-        instrument, timeframe = pending_requests.popleft()
-        active_request = (instrument, timeframe)
-
-        now = datetime.now(UTC)
-        start = now - timedelta(days=LOOKBACK_DAYS[timeframe])
+        request_count = min(HISTORICAL_CHUNK_SIZE, remaining)
+        to_time = datetime.fromtimestamp(
+            active_to_timestamp_ms / 1000,
+            tz=UTC,
+        )
+        from_time = to_time - timedelta(days=LOOKBACK_DAYS[timeframe])
 
         request = ProtoOAGetTrendbarsReq()
         request.ctidTraderAccountId = account_id
         request.symbolId = instrument.symbol_id
         request.period = ProtoOATrendbarPeriod.Value(timeframe.value)
-        request.fromTimestamp = int(start.timestamp() * 1000)
-        request.toTimestamp = int(now.timestamp() * 1000)
-        request.count = TREND_BAR_COUNT
+        request.fromTimestamp = int(from_time.timestamp() * 1000)
+        request.toTimestamp = active_to_timestamp_ms
+        request.count = request_count
 
         deferred = connected_client.send(
             request,
-            clientMsgId=f"trendbars-{instrument.symbol}-{timeframe.value}",
+            clientMsgId=(
+                f"trendbars-{instrument.symbol}-{timeframe.value}-"
+                f"{len(current_candles)}"
+            ),
             responseTimeoutInSeconds=MARKET_DATA_TIMEOUT_SECONDS,
         )
         deferred.addErrback(on_request_error)
 
         print(
-            f"Trendbars request sent: {instrument.symbol} {timeframe.value} "
-            f"({TREND_BAR_COUNT} candles)"
+            f"Historical chunk sent: {instrument.symbol} {timeframe.value} "
+            f"need={request_count} already={len(current_candles)}"
         )
 
     def handle_symbol_metadata(
@@ -254,12 +321,13 @@ def main() -> None:
         connected_client: Client,
         response: ProtoOAGetTrendbarsRes,
     ) -> None:
-        nonlocal active_request
+        nonlocal active_to_timestamp_ms
 
         if active_request is None:
             raise RuntimeError("Received trendbars without an active request")
 
         instrument, timeframe = active_request
+        key = (instrument.symbol, timeframe)
         digits = symbol_digits[instrument.symbol_id]
 
         trendbars = sorted(
@@ -268,11 +336,13 @@ def main() -> None:
         )
 
         if not trendbars:
-            raise RuntimeError(
-                f"No trendbars returned for {instrument.symbol} {timeframe.value}"
+            finish_active_series(
+                connected_client,
+                history_exhausted=True,
             )
+            return
 
-        candles = [
+        chunk_candles = [
             map_trendbar_to_candle(
                 trendbar=CTraderTrendbar(
                     low=int(bar.low),
@@ -289,14 +359,47 @@ def main() -> None:
             for bar in trendbars
         ]
 
-        series[(instrument.symbol, timeframe)] = candles
-        print(
-            f"Domain candles ready: {instrument.symbol} {timeframe.value} "
-            f"({len(candles)})"
+        candles_by_time = {
+            candle.opened_at: candle
+            for candle in series[key]
+        }
+        candles_by_time.update(
+            {candle.opened_at: candle for candle in chunk_candles}
         )
 
-        active_request = None
-        reactor.callLater(0, send_next_trendbars_request, connected_client)
+        series[key] = sorted(
+            candles_by_time.values(),
+            key=lambda candle: candle.opened_at,
+        )[-target_candle_count:]
+
+        earliest_timestamp_minutes = min(
+            int(bar.utcTimestampInMinutes)
+            for bar in trendbars
+        )
+        active_to_timestamp_ms = earliest_timestamp_minutes * 60_000 - 1
+
+        print(
+            f"Historical chunk received: {instrument.symbol} {timeframe.value} "
+            f"chunk={len(chunk_candles)} total={len(series[key])} "
+            f"has_more={bool(response.hasMore)}"
+        )
+
+        if len(series[key]) >= target_candle_count:
+            finish_active_series(connected_client)
+            return
+
+        if active_to_timestamp_ms <= 0:
+            finish_active_series(
+                connected_client,
+                history_exhausted=True,
+            )
+            return
+
+        reactor.callLater(
+            HISTORICAL_REQUEST_DELAY_SECONDS,
+            send_next_trendbars_request,
+            connected_client,
+        )
 
     def on_message_received(connected_client: Client, message: Any) -> None:
         if shutdown_started:
