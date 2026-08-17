@@ -5,7 +5,6 @@ from decimal import Decimal
 from nds_bot.domain.market.candle import Candle
 from nds_bot.domain.market.timeframe import Timeframe
 
-
 CTRADER_PRICE_DIVISOR = Decimal("100000")
 
 
