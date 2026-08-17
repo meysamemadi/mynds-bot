@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import traceback
+import webbrowser
+from collections import deque
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from ctrader_open_api import Client, EndPoints, Protobuf, TcpProtocol
@@ -29,19 +33,32 @@ from nds_bot.infrastructure.market_data.ctrader.trendbar_mapper import (
     map_trendbar_to_candle,
 )
 from nds_bot.infrastructure.visualization.plotly_candles import (
-    build_candlestick_figure,
+    write_switchable_candlestick_chart,
 )
 
 AUTH_TIMEOUT_SECONDS = 20
 MARKET_DATA_TIMEOUT_SECONDS = 60
-
-TARGET_SYMBOL = "EURUSD"
-TARGET_SYMBOL_ID = 1
-TARGET_TIMEFRAME = Timeframe.M1
-TARGET_PERIOD = TARGET_TIMEFRAME.value
-
 TREND_BAR_COUNT = 200
-LOOKBACK_DAYS = 7
+
+TIMEFRAMES = (
+    Timeframe.M1,
+    Timeframe.M3,
+    Timeframe.M15,
+    Timeframe.H1,
+)
+
+LOOKBACK_DAYS = {
+    Timeframe.M1: 7,
+    Timeframe.M3: 14,
+    Timeframe.M15: 30,
+    Timeframe.H1: 60,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class ChartInstrument:
+    symbol: str
+    symbol_id: int
 
 
 def select_host(environment: str) -> str:
@@ -63,6 +80,29 @@ def main() -> None:
     if settings.ctrader_account_id is None:
         raise RuntimeError("CTRADER_ACCOUNT_ID is not configured in .env")
 
+    if settings.ctrader_gold_symbol_id is None:
+        raise RuntimeError(
+            "CTRADER_GOLD_SYMBOL_ID is not configured. "
+            "Run scripts/discover_ctrader_chart_symbols.py first."
+        )
+
+    if settings.ctrader_dow_symbol_id is None:
+        raise RuntimeError(
+            "CTRADER_DOW_SYMBOL_ID is not configured. "
+            "Run scripts/discover_ctrader_chart_symbols.py first."
+        )
+
+    instruments = (
+        ChartInstrument(
+            symbol="GOLD",
+            symbol_id=settings.ctrader_gold_symbol_id,
+        ),
+        ChartInstrument(
+            symbol="DOW",
+            symbol_id=settings.ctrader_dow_symbol_id,
+        ),
+    )
+
     account_id = settings.ctrader_account_id
     host = select_host(settings.ctrader_environment)
 
@@ -72,9 +112,16 @@ def main() -> None:
         TcpProtocol,
     )
 
-    candles: list[Candle] = []
+    pending_requests = deque(
+        (instrument, timeframe)
+        for instrument in instruments
+        for timeframe in TIMEFRAMES
+    )
+
+    series: dict[tuple[str, Timeframe], list[Candle]] = {}
+    symbol_digits: dict[int, int] = {}
+    active_request: tuple[ChartInstrument, Timeframe] | None = None
     shutdown_started = False
-    symbol_digits: int | None = None
 
     def stop_reactor() -> None:
         if reactor.running:
@@ -134,38 +181,48 @@ def main() -> None:
     def send_symbol_metadata_request(connected_client: Client) -> None:
         request = ProtoOASymbolByIdReq()
         request.ctidTraderAccountId = account_id
-        request.symbolId.append(TARGET_SYMBOL_ID)
+        request.symbolId.extend(instrument.symbol_id for instrument in instruments)
 
         deferred = connected_client.send(
             request,
-            clientMsgId="symbol-by-id",
+            clientMsgId="symbol-metadata",
             responseTimeoutInSeconds=MARKET_DATA_TIMEOUT_SECONDS,
         )
         deferred.addErrback(on_request_error)
 
-        print(f"Symbol metadata request sent: {TARGET_SYMBOL} ({TARGET_SYMBOL_ID})")
+        print("Symbol metadata request sent for GOLD and DOW")
 
-    def send_trendbars_request(connected_client: Client) -> None:
+    def send_next_trendbars_request(connected_client: Client) -> None:
+        nonlocal active_request
+
+        if not pending_requests:
+            active_request = None
+            schedule_shutdown()
+            return
+
+        instrument, timeframe = pending_requests.popleft()
+        active_request = (instrument, timeframe)
+
         now = datetime.now(UTC)
-        start = now - timedelta(days=LOOKBACK_DAYS)
+        start = now - timedelta(days=LOOKBACK_DAYS[timeframe])
 
         request = ProtoOAGetTrendbarsReq()
         request.ctidTraderAccountId = account_id
-        request.symbolId = TARGET_SYMBOL_ID
-        request.period = ProtoOATrendbarPeriod.Value(TARGET_PERIOD)
+        request.symbolId = instrument.symbol_id
+        request.period = ProtoOATrendbarPeriod.Value(timeframe.value)
         request.fromTimestamp = int(start.timestamp() * 1000)
         request.toTimestamp = int(now.timestamp() * 1000)
         request.count = TREND_BAR_COUNT
 
         deferred = connected_client.send(
             request,
-            clientMsgId="trendbars",
+            clientMsgId=f"trendbars-{instrument.symbol}-{timeframe.value}",
             responseTimeoutInSeconds=MARKET_DATA_TIMEOUT_SECONDS,
         )
         deferred.addErrback(on_request_error)
 
         print(
-            f"Trendbars request sent: {TARGET_SYMBOL} {TARGET_PERIOD} "
+            f"Trendbars request sent: {instrument.symbol} {timeframe.value} "
             f"({TREND_BAR_COUNT} candles)"
         )
 
@@ -173,29 +230,37 @@ def main() -> None:
         connected_client: Client,
         response: ProtoOASymbolByIdRes,
     ) -> None:
-        nonlocal symbol_digits
+        for symbol in response.symbol:
+            symbol_digits[int(symbol.symbolId)] = int(symbol.digits)
 
-        symbols = list(response.symbol)
+        missing_ids = [
+            instrument.symbol_id
+            for instrument in instruments
+            if instrument.symbol_id not in symbol_digits
+        ]
 
-        if not symbols:
-            print("No symbol metadata returned")
-            schedule_shutdown()
-            return
+        if missing_ids:
+            raise RuntimeError(f"No metadata returned for symbol IDs: {missing_ids}")
 
-        symbol = symbols[0]
-        symbol_digits = int(symbol.digits)
+        for instrument in instruments:
+            print(
+                f"Metadata ready: {instrument.symbol} "
+                f"id={instrument.symbol_id} digits={symbol_digits[instrument.symbol_id]}"
+            )
 
-        print(
-            "Symbol metadata received:",
-            f"digits={symbol_digits}",
-            f"pip_position={int(symbol.pipPosition)}",
-        )
+        reactor.callLater(0, send_next_trendbars_request, connected_client)
 
-        reactor.callLater(0, send_trendbars_request, connected_client)
+    def handle_trendbars(
+        connected_client: Client,
+        response: ProtoOAGetTrendbarsRes,
+    ) -> None:
+        nonlocal active_request
 
-    def handle_trendbars(response: ProtoOAGetTrendbarsRes) -> None:
-        if symbol_digits is None:
-            raise RuntimeError("symbol metadata must be loaded before trendbars")
+        if active_request is None:
+            raise RuntimeError("Received trendbars without an active request")
+
+        instrument, timeframe = active_request
+        digits = symbol_digits[instrument.symbol_id]
 
         trendbars = sorted(
             response.trendbar,
@@ -203,11 +268,11 @@ def main() -> None:
         )
 
         if not trendbars:
-            print("No trendbars returned")
-            schedule_shutdown()
-            return
+            raise RuntimeError(
+                f"No trendbars returned for {instrument.symbol} {timeframe.value}"
+            )
 
-        candles.extend(
+        candles = [
             map_trendbar_to_candle(
                 trendbar=CTraderTrendbar(
                     low=int(bar.low),
@@ -217,15 +282,21 @@ def main() -> None:
                     volume=int(bar.volume),
                     utc_timestamp_in_minutes=int(bar.utcTimestampInMinutes),
                 ),
-                symbol=TARGET_SYMBOL,
-                timeframe=TARGET_TIMEFRAME,
-                digits=symbol_digits,
+                symbol=instrument.symbol,
+                timeframe=timeframe,
+                digits=digits,
             )
             for bar in trendbars
+        ]
+
+        series[(instrument.symbol, timeframe)] = candles
+        print(
+            f"Domain candles ready: {instrument.symbol} {timeframe.value} "
+            f"({len(candles)})"
         )
 
-        print(f"Domain candles created: {len(candles)}")
-        schedule_shutdown()
+        active_request = None
+        reactor.callLater(0, send_next_trendbars_request, connected_client)
 
     def on_message_received(connected_client: Client, message: Any) -> None:
         if shutdown_started:
@@ -252,7 +323,7 @@ def main() -> None:
                 return
 
             if isinstance(response, ProtoOAGetTrendbarsRes):
-                handle_trendbars(response)
+                handle_trendbars(connected_client, response)
                 return
 
             if isinstance(response, ProtoOAErrorRes):
@@ -297,14 +368,23 @@ def main() -> None:
     client.startService()
     reactor.run()
 
-    if not candles:
-        raise RuntimeError("No candles were available to plot")
+    expected_series_count = len(instruments) * len(TIMEFRAMES)
 
-    figure = build_candlestick_figure(
-        candles,
-        title=f"{TARGET_SYMBOL} — {TARGET_PERIOD} — cTrader",
+    if len(series) != expected_series_count:
+        raise RuntimeError(
+            f"Expected {expected_series_count} chart series, received {len(series)}"
+        )
+
+    chart_path = write_switchable_candlestick_chart(
+        series,
+        output_path=Path("artifacts/ctrader_candles.html"),
+        initial_symbol="GOLD",
+        initial_timeframe=Timeframe.M1,
     )
-    figure.show(renderer="browser")
+
+    resolved_path = chart_path.resolve()
+    print(f"Chart written to: {resolved_path}")
+    webbrowser.open(resolved_path.as_uri())
 
 
 if __name__ == "__main__":
