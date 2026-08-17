@@ -6,7 +6,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from ctrader_open_api import Client, EndPoints, Protobuf, TcpProtocol
 from ctrader_open_api.messages.OpenApiCommonMessages_pb2 import ProtoHeartbeatEvent
@@ -29,13 +29,20 @@ from nds_bot.config import load_settings
 from nds_bot.domain.market.candle import Candle
 from nds_bot.domain.market.timeframe import Timeframe
 from nds_bot.domain.market.z import (
+    DEFAULT_Z_BARS_AFTER,
     DEFAULT_Z_REFERENCE_LOOKBACK_BARS,
     ZAnchor,
+    ZCalculationWindow,
+    build_z_calculation_window,
     find_bull_z_anchor,
 )
 from nds_bot.infrastructure.market_data.ctrader.trendbar_mapper import (
     CTraderTrendbar,
     map_trendbar_to_candle,
+)
+from nds_bot.infrastructure.market_data.history_cache import (
+    CandleHistoryCache,
+    merge_candle_history,
 )
 from nds_bot.infrastructure.visualization.plotly_candles import (
     write_switchable_candlestick_chart,
@@ -45,7 +52,11 @@ AUTH_TIMEOUT_SECONDS = 20
 MARKET_DATA_TIMEOUT_SECONDS = 60
 HISTORICAL_CHUNK_SIZE = 1000
 HISTORICAL_REQUEST_DELAY_SECONDS = 0.25
+HISTORY_CACHE_ROOT = Path("data/history")
 Z_REFERENCE_LOOKBACK_BARS = DEFAULT_Z_REFERENCE_LOOKBACK_BARS
+Z_BARS_AFTER = DEFAULT_Z_BARS_AFTER
+
+HistoryPhase = Literal["refresh", "bridge", "backfill"]
 
 TIMEFRAMES = (
     Timeframe.M1,
@@ -113,6 +124,7 @@ def main() -> None:
     target_candle_count = settings.ctrader_history_candle_count
     account_id = settings.ctrader_account_id
     host = select_host(settings.ctrader_environment)
+    history_cache = CandleHistoryCache(HISTORY_CACHE_ROOT)
 
     client = Client(
         host,
@@ -126,10 +138,37 @@ def main() -> None:
         for timeframe in TIMEFRAMES
     )
 
+    cached_series: dict[tuple[str, Timeframe], list[Candle]] = {}
+    for instrument in instruments:
+        for timeframe in TIMEFRAMES:
+            key = (instrument.symbol, timeframe)
+            try:
+                cached = history_cache.load(
+                    symbol=instrument.symbol,
+                    timeframe=timeframe,
+                )
+            except ValueError as exc:
+                print(
+                    f"Ignoring invalid cache: {instrument.symbol} "
+                    f"{timeframe.value} ({exc})"
+                )
+                cached = []
+
+            if cached:
+                cached_series[key] = cached[-target_candle_count:]
+                print(
+                    f"Cache hit: {instrument.symbol} {timeframe.value} "
+                    f"({len(cached_series[key])} candles)"
+                )
+            else:
+                print(f"Cache miss: {instrument.symbol} {timeframe.value}")
+
     series: dict[tuple[str, Timeframe], list[Candle]] = {}
     symbol_digits: dict[int, int] = {}
     active_request: tuple[ChartInstrument, Timeframe] | None = None
     active_to_timestamp_ms: int | None = None
+    active_phase: HistoryPhase | None = None
+    active_cached_latest: datetime | None = None
     shutdown_started = False
 
     def stop_reactor() -> None:
@@ -208,27 +247,42 @@ def main() -> None:
     ) -> None:
         nonlocal active_request
         nonlocal active_to_timestamp_ms
+        nonlocal active_phase
+        nonlocal active_cached_latest
 
         if active_request is None:
             raise RuntimeError("No active historical series to finish")
 
         instrument, timeframe = active_request
         key = (instrument.symbol, timeframe)
-        candles = series[key]
+        candles = merge_candle_history(
+            series[key],
+            max_candles=target_candle_count,
+        )
+        series[key] = candles
 
         if not candles:
             raise RuntimeError(
                 f"No trendbars returned for {instrument.symbol} {timeframe.value}"
             )
 
+        cache_path = history_cache.save(
+            symbol=instrument.symbol,
+            timeframe=timeframe,
+            candles=candles,
+        )
+
         suffix = " (history exhausted)" if history_exhausted else ""
         print(
             f"Series ready: {instrument.symbol} {timeframe.value} "
             f"({len(candles)} candles){suffix}"
         )
+        print(f"Cache updated: {cache_path}")
 
         active_request = None
         active_to_timestamp_ms = None
+        active_phase = None
+        active_cached_latest = None
 
         reactor.callLater(
             HISTORICAL_REQUEST_DELAY_SECONDS,
@@ -236,26 +290,50 @@ def main() -> None:
             connected_client,
         )
 
-    def send_next_trendbars_request(connected_client: Client) -> None:
+    def start_next_series() -> None:
         nonlocal active_request
+        nonlocal active_to_timestamp_ms
+        nonlocal active_phase
+        nonlocal active_cached_latest
+
+        if not pending_series:
+            return
+
+        active_request = pending_series.popleft()
+        instrument, timeframe = active_request
+        key = (instrument.symbol, timeframe)
+        cached = cached_series.get(key, [])
+
+        active_to_timestamp_ms = int(datetime.now(UTC).timestamp() * 1000)
+        series[key] = list(cached)
+
+        print()
+        if cached:
+            active_phase = "refresh"
+            active_cached_latest = cached[-1].opened_at
+            print(
+                f"Refreshing {instrument.symbol} {timeframe.value}: "
+                f"cache={len(cached)} target={target_candle_count}"
+            )
+        else:
+            active_phase = "backfill"
+            active_cached_latest = None
+            print(
+                f"Loading {instrument.symbol} {timeframe.value}: "
+                f"target={target_candle_count} candles"
+            )
+
+    def send_next_trendbars_request(connected_client: Client) -> None:
         nonlocal active_to_timestamp_ms
 
         if active_request is None:
             if not pending_series:
                 schedule_shutdown()
                 return
+            start_next_series()
 
-            active_request = pending_series.popleft()
-            active_to_timestamp_ms = int(datetime.now(UTC).timestamp() * 1000)
-
-            instrument, timeframe = active_request
-            series[(instrument.symbol, timeframe)] = []
-
-            print()
-            print(
-                f"Loading {instrument.symbol} {timeframe.value}: "
-                f"target={target_candle_count} candles"
-            )
+        if active_request is None or active_phase is None:
+            raise RuntimeError("Historical series state is not initialized")
 
         if active_to_timestamp_ms is None:
             raise RuntimeError("Historical cursor is not initialized")
@@ -263,13 +341,16 @@ def main() -> None:
         instrument, timeframe = active_request
         key = (instrument.symbol, timeframe)
         current_candles = series[key]
-        remaining = target_candle_count - len(current_candles)
 
-        if remaining <= 0:
-            finish_active_series(connected_client)
-            return
+        if active_phase == "backfill":
+            remaining = target_candle_count - len(current_candles)
+            if remaining <= 0:
+                finish_active_series(connected_client)
+                return
+            request_count = min(HISTORICAL_CHUNK_SIZE, remaining)
+        else:
+            request_count = min(HISTORICAL_CHUNK_SIZE, target_candle_count)
 
-        request_count = min(HISTORICAL_CHUNK_SIZE, remaining)
         to_time = datetime.fromtimestamp(
             active_to_timestamp_ms / 1000,
             tz=UTC,
@@ -288,7 +369,7 @@ def main() -> None:
             request,
             clientMsgId=(
                 f"trendbars-{instrument.symbol}-{timeframe.value}-"
-                f"{len(current_candles)}"
+                f"{active_phase}-{len(current_candles)}"
             ),
             responseTimeoutInSeconds=MARKET_DATA_TIMEOUT_SECONDS,
         )
@@ -296,7 +377,8 @@ def main() -> None:
 
         print(
             f"Historical chunk sent: {instrument.symbol} {timeframe.value} "
-            f"need={request_count} already={len(current_candles)}"
+            f"phase={active_phase} count={request_count} "
+            f"loaded={len(current_candles)}"
         )
 
     def handle_symbol_metadata(
@@ -316,20 +398,29 @@ def main() -> None:
             raise RuntimeError(f"No metadata returned for symbol IDs: {missing_ids}")
 
         for instrument in instruments:
+            digits = symbol_digits[instrument.symbol_id]
             print(
                 f"Metadata ready: {instrument.symbol} "
-                f"id={instrument.symbol_id} digits={symbol_digits[instrument.symbol_id]}"
+                f"id={instrument.symbol_id} digits={digits}"
             )
 
         reactor.callLater(0, send_next_trendbars_request, connected_client)
+
+    def schedule_next_history_request(connected_client: Client) -> None:
+        reactor.callLater(
+            HISTORICAL_REQUEST_DELAY_SECONDS,
+            send_next_trendbars_request,
+            connected_client,
+        )
 
     def handle_trendbars(
         connected_client: Client,
         response: ProtoOAGetTrendbarsRes,
     ) -> None:
         nonlocal active_to_timestamp_ms
+        nonlocal active_phase
 
-        if active_request is None:
+        if active_request is None or active_phase is None:
             raise RuntimeError("Received trendbars without an active request")
 
         instrument, timeframe = active_request
@@ -344,7 +435,7 @@ def main() -> None:
         if not trendbars:
             finish_active_series(
                 connected_client,
-                history_exhausted=True,
+                history_exhausted=(active_phase != "refresh"),
             )
             return
 
@@ -365,18 +456,7 @@ def main() -> None:
             for bar in trendbars
         ]
 
-        candles_by_time = {
-            candle.opened_at: candle
-            for candle in series[key]
-        }
-        candles_by_time.update(
-            {candle.opened_at: candle for candle in chunk_candles}
-        )
-
-        series[key] = sorted(
-            candles_by_time.values(),
-            key=lambda candle: candle.opened_at,
-        )[-target_candle_count:]
+        series[key] = merge_candle_history(series[key], chunk_candles)
 
         earliest_timestamp_minutes = min(
             int(bar.utcTimestampInMinutes)
@@ -386,8 +466,52 @@ def main() -> None:
 
         print(
             f"Historical chunk received: {instrument.symbol} {timeframe.value} "
-            f"chunk={len(chunk_candles)} total={len(series[key])}"
+            f"phase={active_phase} chunk={len(chunk_candles)} "
+            f"merged={len(series[key])}"
         )
+
+        if active_phase == "refresh":
+            if active_cached_latest is None:
+                raise RuntimeError("Refresh phase requires cached history")
+
+            refresh_earliest = chunk_candles[0].opened_at
+            if refresh_earliest <= active_cached_latest:
+                active_phase = "backfill"
+                if len(series[key]) >= target_candle_count:
+                    finish_active_series(connected_client)
+                    return
+
+                active_to_timestamp_ms = (
+                    int(series[key][0].opened_at.timestamp() * 1000) - 1
+                )
+                schedule_next_history_request(connected_client)
+                return
+
+            active_phase = "bridge"
+            print(
+                f"Cache gap detected: {instrument.symbol} {timeframe.value}; "
+                "bridging older chunks until cache overlap"
+            )
+            schedule_next_history_request(connected_client)
+            return
+
+        if active_phase == "bridge":
+            if active_cached_latest is None:
+                raise RuntimeError("Bridge phase requires cached history")
+
+            chunk_earliest = chunk_candles[0].opened_at
+            if chunk_earliest <= active_cached_latest:
+                active_phase = "backfill"
+                if len(series[key]) >= target_candle_count:
+                    finish_active_series(connected_client)
+                    return
+
+                active_to_timestamp_ms = (
+                    int(series[key][0].opened_at.timestamp() * 1000) - 1
+                )
+
+            schedule_next_history_request(connected_client)
+            return
 
         if len(series[key]) >= target_candle_count:
             finish_active_series(connected_client)
@@ -400,11 +524,7 @@ def main() -> None:
             )
             return
 
-        reactor.callLater(
-            HISTORICAL_REQUEST_DELAY_SECONDS,
-            send_next_trendbars_request,
-            connected_client,
-        )
+        schedule_next_history_request(connected_client)
 
     def on_message_received(connected_client: Client, message: Any) -> None:
         if shutdown_started:
@@ -477,19 +597,23 @@ def main() -> None:
     reactor.run()
 
     expected_series_count = len(instruments) * len(TIMEFRAMES)
-
     if len(series) != expected_series_count:
         raise RuntimeError(
             f"Expected {expected_series_count} chart series, received {len(series)}"
         )
 
     z_anchors: dict[tuple[str, Timeframe], ZAnchor] = {}
+    z_windows: dict[tuple[str, Timeframe], ZCalculationWindow] = {}
     calculation_time = datetime.now(UTC)
 
     print()
     print(
         "Calculating Bull Z anchors with NodeCounterv2 contract: "
         f"reference_lookback={Z_REFERENCE_LOOKBACK_BARS}"
+    )
+    print(
+        "Calculation range after Z: "
+        f"Z+1 through Z+{Z_BARS_AFTER} closed candles"
     )
 
     for key, candles in series.items():
@@ -504,23 +628,32 @@ def main() -> None:
             closed_candles,
             reference_lookback=Z_REFERENCE_LOOKBACK_BARS,
         )
-
         if z_anchor is None:
             print(f"Z not found: {symbol} {timeframe.value}")
             continue
 
+        z_window = build_z_calculation_window(
+            closed_candles,
+            z_anchor,
+            bars_after_z=Z_BARS_AFTER,
+        )
         z_anchors[key] = z_anchor
+        z_windows[key] = z_window
+
         mode = "ATH" if z_anchor.all_time_high_mode else "BOUNDED"
         boundary = (
             "none"
             if z_anchor.left_boundary_index is None
             else str(z_anchor.left_boundary_index)
         )
+        window_status = "complete" if z_window.complete else "incomplete"
         print(
             f"Z ready: {symbol} {timeframe.value} "
             f"time={z_anchor.time.isoformat()} price={z_anchor.price} "
             f"reference_high={z_anchor.reference_high} "
-            f"boundary={boundary} mode={mode}"
+            f"boundary={boundary} mode={mode} "
+            f"window={z_window.available_bars}/{Z_BARS_AFTER} "
+            f"({window_status})"
         )
 
     chart_path = write_switchable_candlestick_chart(
@@ -529,6 +662,7 @@ def main() -> None:
         initial_symbol="GOLD",
         initial_timeframe=Timeframe.M1,
         z_anchors=z_anchors,
+        z_windows=z_windows,
     )
 
     resolved_path = chart_path.resolve()
