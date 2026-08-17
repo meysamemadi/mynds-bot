@@ -5,11 +5,24 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
+from os import getenv
 
 from nds_bot.domain.market.candle import Candle
 
 DEFAULT_Z_REFERENCE_LOOKBACK_BARS = 200
-DEFAULT_Z_BARS_AFTER = 200
+
+
+def _positive_env_int(name: str, default: int) -> int:
+    value = getenv(name)
+    parsed = int(value) if value else default
+
+    if parsed <= 0:
+        raise RuntimeError(f"{name} must be greater than zero")
+
+    return parsed
+
+
+DEFAULT_Z_BARS_AFTER = _positive_env_int("Z_BARS_AFTER", 200)
 
 
 class ZSelectionMode(StrEnum):
