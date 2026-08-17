@@ -82,9 +82,8 @@ def write_switchable_candlestick_chart(
             )
         )
 
-    initial_title = f"{initial_symbol} — {initial_timeframe.value} — cTrader"
-    _apply_layout(figure, title=initial_title)
-    figure.update_layout(showlegend=False)
+    initial_title = f"{initial_symbol} — {initial_timeframe.value}"
+    _apply_workspace_layout(figure)
 
     symbols = list(dict.fromkeys(symbol for symbol, _ in series))
     timeframes = list(dict.fromkeys(timeframe for _, timeframe in series))
@@ -97,105 +96,371 @@ def write_switchable_candlestick_chart(
         config={
             "displaylogo": False,
             "responsive": True,
+            "scrollZoom": True,
         },
     )
 
-    symbol_options = "".join(
-        _option_html(
-            value=symbol,
-            selected=symbol == initial_symbol,
+    symbol_buttons = "".join(
+        _selector_button_html(
+            label=symbol,
+            data_name="symbol",
+            data_value=symbol,
+            active=symbol == initial_symbol,
         )
         for symbol in symbols
     )
 
-    timeframe_options = "".join(
-        _option_html(
-            value=timeframe.value,
-            selected=timeframe is initial_timeframe,
+    timeframe_buttons = "".join(
+        _selector_button_html(
+            label=timeframe.value,
+            data_name="timeframe",
+            data_value=timeframe.value,
+            active=timeframe is initial_timeframe,
         )
         for timeframe in timeframes
     )
 
     trace_keys_json = json.dumps(trace_keys)
+    initial_symbol_json = json.dumps(initial_symbol)
+    initial_timeframe_json = json.dumps(initial_timeframe.value)
 
     document = f"""<!doctype html>
 <html lang=\"en\">
 <head>
   <meta charset=\"utf-8\">
   <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
-  <title>{escape(initial_title)}</title>
+  <title>{escape(initial_title)} — cTrader</title>
   <style>
-    html, body {{
-      margin: 0;
-      min-height: 100%;
-      background: #111827;
-      color: #f9fafb;
-      font-family: Arial, sans-serif;
+    :root {{
+      color-scheme: dark;
+      --bg: #0b0e11;
+      --panel: #111418;
+      --panel-hover: #1b2028;
+      --border: #242831;
+      --text: #d1d4dc;
+      --muted: #787b86;
+      --active: #2962ff;
+      --active-hover: #1e53e5;
+      --positive: #26a69a;
     }}
-    .toolbar {{
-      display: flex;
-      gap: 12px;
-      align-items: end;
-      padding: 14px 18px 4px;
-      background: #111827;
+
+    * {{
+      box-sizing: border-box;
     }}
-    .control {{
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-      font-size: 12px;
-      color: #9ca3af;
-    }}
-    select {{
-      min-width: 150px;
-      padding: 8px 10px;
-      border: 1px solid #374151;
-      border-radius: 6px;
-      background: #1f2937;
-      color: #f9fafb;
-      font-size: 14px;
-    }}
-    #candlestick-chart {{
+
+    html,
+    body {{
       width: 100%;
-      height: calc(100vh - 76px);
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;
+    }}
+
+    button {{
+      font: inherit;
+    }}
+
+    .app-shell {{
+      display: grid;
+      grid-template-columns: 220px minmax(0, 1fr);
+      width: 100vw;
+      height: 100vh;
+      background: var(--bg);
+    }}
+
+    .sidebar {{
+      display: flex;
+      min-height: 0;
+      flex-direction: column;
+      background: var(--panel);
+      border-right: 1px solid var(--border);
+    }}
+
+    .brand {{
+      display: flex;
+      height: 52px;
+      flex: 0 0 52px;
+      align-items: center;
+      gap: 10px;
+      padding: 0 16px;
+      border-bottom: 1px solid var(--border);
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+    }}
+
+    .brand-mark {{
+      display: inline-flex;
+      width: 26px;
+      height: 26px;
+      align-items: center;
+      justify-content: center;
+      border-radius: 6px;
+      background: var(--active);
+      color: #fff;
+      font-size: 11px;
+      font-weight: 800;
+    }}
+
+    .sidebar-content {{
+      min-height: 0;
+      flex: 1;
+      overflow-y: auto;
+      padding: 14px 10px 20px;
+    }}
+
+    .sidebar-section + .sidebar-section {{
+      margin-top: 22px;
+    }}
+
+    .section-title {{
+      margin: 0 8px 8px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }}
+
+    .selector-list {{
+      display: grid;
+      gap: 4px;
+    }}
+
+    .selector-button {{
+      width: 100%;
+      min-height: 38px;
+      padding: 0 10px;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--text);
+      cursor: pointer;
+      text-align: left;
+      transition: background 120ms ease, border-color 120ms ease;
+    }}
+
+    .selector-button:hover {{
+      background: var(--panel-hover);
+    }}
+
+    .selector-button.active {{
+      border-color: rgba(41, 98, 255, 0.48);
+      background: rgba(41, 98, 255, 0.18);
+      color: #fff;
+    }}
+
+    .timeframe-list {{
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }}
+
+    .timeframe-list .selector-button {{
+      text-align: center;
+      font-weight: 600;
+    }}
+
+    .sidebar-footer {{
+      padding: 12px 16px;
+      border-top: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 11px;
+    }}
+
+    .workspace {{
+      display: flex;
+      min-width: 0;
+      min-height: 0;
+      flex-direction: column;
+      background: var(--bg);
+    }}
+
+    .topbar {{
+      display: flex;
+      height: 52px;
+      flex: 0 0 52px;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+    }}
+
+    .instrument-title {{
+      display: flex;
+      align-items: baseline;
+      gap: 9px;
+      white-space: nowrap;
+    }}
+
+    #active-symbol {{
+      color: #f0f3fa;
+      font-size: 15px;
+      font-weight: 700;
+    }}
+
+    #active-timeframe {{
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 600;
+    }}
+
+    .source-status {{
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+
+    .status-dot {{
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--positive);
+      box-shadow: 0 0 0 3px rgba(38, 166, 154, 0.12);
+    }}
+
+    .chart-container {{
+      min-width: 0;
+      min-height: 0;
+      flex: 1;
+      position: relative;
+    }}
+
+    #candlestick-chart {{
+      width: 100% !important;
+      height: 100% !important;
+    }}
+
+    #candlestick-chart .plot-container,
+    #candlestick-chart .svg-container {{
+      width: 100% !important;
+      height: 100% !important;
+    }}
+
+    @media (max-width: 720px) {{
+      .app-shell {{
+        grid-template-columns: 150px minmax(0, 1fr);
+      }}
+
+      .brand {{
+        padding: 0 10px;
+      }}
+
+      .source-status span:last-child {{
+        display: none;
+      }}
     }}
   </style>
 </head>
 <body>
-  <div class=\"toolbar\">
-    <label class=\"control\">
-      Symbol
-      <select id=\"symbol-select\">{symbol_options}</select>
-    </label>
-    <label class=\"control\">
-      Timeframe
-      <select id=\"timeframe-select\">{timeframe_options}</select>
-    </label>
-  </div>
-  {chart_div}
+  <main class=\"app-shell\">
+    <aside class=\"sidebar\">
+      <div class=\"brand\">
+        <span class=\"brand-mark\">NDS</span>
+        <span>Market Chart</span>
+      </div>
+
+      <div class=\"sidebar-content\">
+        <section class=\"sidebar-section\">
+          <h2 class=\"section-title\">Symbols</h2>
+          <div class=\"selector-list\" id=\"symbol-list\">
+            {symbol_buttons}
+          </div>
+        </section>
+
+        <section class=\"sidebar-section\">
+          <h2 class=\"section-title\">Timeframes</h2>
+          <div class=\"selector-list timeframe-list\" id=\"timeframe-list\">
+            {timeframe_buttons}
+          </div>
+        </section>
+      </div>
+
+      <div class=\"sidebar-footer\">cTrader historical trendbars</div>
+    </aside>
+
+    <section class=\"workspace\">
+      <header class=\"topbar\">
+        <div class=\"instrument-title\">
+          <span id=\"active-symbol\">{escape(initial_symbol)}</span>
+          <span id=\"active-timeframe\">{escape(initial_timeframe.value)}</span>
+        </div>
+        <div class=\"source-status\">
+          <span class=\"status-dot\"></span>
+          <span>cTrader data</span>
+        </div>
+      </header>
+
+      <div class=\"chart-container\">
+        {chart_div}
+      </div>
+    </section>
+  </main>
+
   <script>
     const chartId = "candlestick-chart";
     const traceKeys = {trace_keys_json};
-    const symbolSelect = document.getElementById("symbol-select");
-    const timeframeSelect = document.getElementById("timeframe-select");
+    let selectedSymbol = {initial_symbol_json};
+    let selectedTimeframe = {initial_timeframe_json};
+
+    const activeSymbol = document.getElementById("active-symbol");
+    const activeTimeframe = document.getElementById("active-timeframe");
+    const symbolButtons = Array.from(document.querySelectorAll("[data-symbol]"));
+    const timeframeButtons = Array.from(
+      document.querySelectorAll("[data-timeframe]")
+    );
+
+    function setActiveButton(buttons, selectedValue, dataName) {{
+      for (const button of buttons) {{
+        button.classList.toggle(
+          "active",
+          button.dataset[dataName] === selectedValue
+        );
+      }}
+    }}
 
     function updateChart() {{
-      const selectedKey = `${{symbolSelect.value}}::${{timeframeSelect.value}}`;
+      const selectedKey = `${{selectedSymbol}}::${{selectedTimeframe}}`;
       const updates = traceKeys.map((key, index) =>
         Plotly.restyle(chartId, {{visible: key === selectedKey}}, [index])
       );
 
+      setActiveButton(symbolButtons, selectedSymbol, "symbol");
+      setActiveButton(timeframeButtons, selectedTimeframe, "timeframe");
+      activeSymbol.textContent = selectedSymbol;
+      activeTimeframe.textContent = selectedTimeframe;
+      document.title = `${{selectedSymbol}} — ${{selectedTimeframe}} — cTrader`;
+
       Promise.all(updates).then(() => {{
         Plotly.relayout(chartId, {{
-          "title.text": `${{symbolSelect.value}} — ${{timeframeSelect.value}} — cTrader`,
           "xaxis.autorange": true,
           "yaxis.autorange": true
         }});
+        Plotly.Plots.resize(document.getElementById(chartId));
       }});
     }}
 
-    symbolSelect.addEventListener("change", updateChart);
-    timeframeSelect.addEventListener("change", updateChart);
+    for (const button of symbolButtons) {{
+      button.addEventListener("click", () => {{
+        selectedSymbol = button.dataset.symbol;
+        updateChart();
+      }});
+    }}
+
+    for (const button of timeframeButtons) {{
+      button.addEventListener("click", () => {{
+        selectedTimeframe = button.dataset.timeframe;
+        updateChart();
+      }});
+    }}
+
+    window.addEventListener("resize", () => {{
+      Plotly.Plots.resize(document.getElementById(chartId));
+    }});
   </script>
 </body>
 </html>
@@ -236,6 +501,10 @@ def _build_trace(
         close=[float(candle.close) for candle in candles],
         name=name,
         visible=visible,
+        increasing_line_color="#26a69a",
+        decreasing_line_color="#ef5350",
+        increasing_fillcolor="#26a69a",
+        decreasing_fillcolor="#ef5350",
     )
 
 
@@ -254,11 +523,50 @@ def _apply_layout(
     )
 
 
+def _apply_workspace_layout(figure: go.Figure) -> None:
+    figure.update_layout(
+        autosize=True,
+        showlegend=False,
+        template="plotly_dark",
+        paper_bgcolor="#0b0e11",
+        plot_bgcolor="#0b0e11",
+        margin={"l": 10, "r": 58, "t": 12, "b": 24},
+        hovermode="x",
+        xaxis={
+            "rangeslider": {"visible": False},
+            "showgrid": True,
+            "gridcolor": "#1f232b",
+            "zeroline": False,
+            "showline": False,
+            "title": None,
+        },
+        yaxis={
+            "side": "right",
+            "showgrid": True,
+            "gridcolor": "#1f232b",
+            "zeroline": False,
+            "showline": False,
+            "title": None,
+            "fixedrange": False,
+        },
+    )
+
+
 def _selection_key(symbol: str, timeframe: Timeframe) -> str:
     return f"{symbol}::{timeframe.value}"
 
 
-def _option_html(*, value: str, selected: bool) -> str:
-    selected_attribute = " selected" if selected else ""
-    safe_value = escape(value, quote=True)
-    return f'<option value="{safe_value}"{selected_attribute}>{safe_value}</option>'
+def _selector_button_html(
+    *,
+    label: str,
+    data_name: str,
+    data_value: str,
+    active: bool,
+) -> str:
+    safe_label = escape(label)
+    safe_value = escape(data_value, quote=True)
+    active_class = " active" if active else ""
+    return (
+        f'<button class="selector-button{active_class}" type="button" '
+        f'data-{data_name}="{safe_value}">{safe_label}</button>'
+    )
