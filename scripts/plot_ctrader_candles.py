@@ -28,6 +28,7 @@ from twisted.python.failure import Failure
 from nds_bot.config import load_settings
 from nds_bot.domain.market.candle import Candle
 from nds_bot.domain.market.timeframe import Timeframe
+from nds_bot.domain.market.trend import CubicTrendFit, fit_cubic_midpoint_trend
 from nds_bot.domain.market.z import (
     DEFAULT_Z_BARS_AFTER,
     DEFAULT_Z_REFERENCE_LOOKBACK_BARS,
@@ -604,6 +605,7 @@ def main() -> None:
 
     z_anchors: dict[tuple[str, Timeframe], ZAnchor] = {}
     z_windows: dict[tuple[str, Timeframe], ZCalculationWindow] = {}
+    trend_fits: dict[tuple[str, Timeframe], CubicTrendFit] = {}
     calculation_time = datetime.now(UTC)
 
     print()
@@ -615,6 +617,7 @@ def main() -> None:
         "Calculation range after Z: "
         f"Z+1 through Z+{Z_BARS_AFTER} closed candles"
     )
+    print("Cubic trend input: midpoint=(High+Low)/2 from Z through window end")
 
     for key, candles in series.items():
         symbol, timeframe = key
@@ -640,6 +643,16 @@ def main() -> None:
         z_anchors[key] = z_anchor
         z_windows[key] = z_window
 
+        trend_candles = (
+            closed_candles[z_anchor.bar_index],
+            *z_window.candles,
+        )
+        if len(trend_candles) >= 4:
+            trend_fit = fit_cubic_midpoint_trend(trend_candles)
+            trend_fits[key] = trend_fit
+        else:
+            trend_fit = None
+
         mode = "ATH" if z_anchor.all_time_high_mode else "BOUNDED"
         boundary = (
             "none"
@@ -656,6 +669,22 @@ def main() -> None:
             f"({window_status})"
         )
 
+        if trend_fit is None:
+            print(
+                f"Cubic fit unavailable: {symbol} {timeframe.value} "
+                f"points={len(trend_candles)} (need at least 4)"
+            )
+        else:
+            print(
+                f"Cubic fit: {symbol} {timeframe.value} "
+                f"points={trend_fit.point_count} mse={trend_fit.mse}"
+            )
+            print(
+                "  T(x) = "
+                f"{trend_fit.a0} + ({trend_fit.a1})x + "
+                f"({trend_fit.a2})x^2 + ({trend_fit.a3})x^3"
+            )
+
     chart_path = write_switchable_candlestick_chart(
         series,
         output_path=Path("artifacts/ctrader_candles.html"),
@@ -663,6 +692,7 @@ def main() -> None:
         initial_timeframe=Timeframe.M1,
         z_anchors=z_anchors,
         z_windows=z_windows,
+        trend_fits=trend_fits,
     )
 
     resolved_path = chart_path.resolve()
