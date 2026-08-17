@@ -51,6 +51,21 @@ def _z_anchor(first: Candle, second: Candle) -> ZAnchor:
     )
 
 
+def _trend_candle(index: int, midpoint: Decimal) -> Candle:
+    opened_at = datetime(2026, 1, 1, tzinfo=UTC) + timedelta(minutes=index)
+    return Candle(
+        symbol="GOLD",
+        timeframe=Timeframe.M1,
+        opened_at=opened_at,
+        closed_at=opened_at + timedelta(minutes=1),
+        open=midpoint,
+        high=midpoint + Decimal("0.50"),
+        low=midpoint - Decimal("0.50"),
+        close=midpoint,
+        volume=Decimal("1"),
+    )
+
+
 def test_build_figure_renders_nodecounter_style_z_marker() -> None:
     first, second = _sample_candles()
     z_anchor = _z_anchor(first, second)
@@ -120,3 +135,23 @@ def test_build_figure_renders_cubic_midpoint_trend() -> None:
     assert list(trend_trace.y) == pytest.approx(
         [float(value) for value in trend_fit.fitted_prices]
     )
+
+
+def test_build_figure_renders_maximum_and_minimum_node_types() -> None:
+    candles = []
+    for index in range(7):
+        x = Decimal(index)
+        midpoint = Decimal(100) + x**3 - Decimal(6) * x**2 + Decimal(9) * x
+        candles.append(_trend_candle(index, midpoint))
+
+    trend_fit = fit_cubic_midpoint_trend(candles)
+    figure = build_candlestick_figure(candles, trend_fit=trend_fit)
+
+    assert len(figure.data) == 3
+    node_trace = figure.data[2]
+    assert node_trace.name == "Trend nodes"
+    assert list(node_trace.text) == ["N1 MAX", "N2 MIN"]
+    assert list(node_trace.x) == [
+        candles[1].opened_at,
+        candles[3].opened_at,
+    ]
