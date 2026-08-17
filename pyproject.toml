@@ -5,11 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "nds-bot"
 version = "0.1.0"
-description = "Event-driven trading engine using cTrader Open API"
+description = "cTrader trendbars to domain candles and Plotly charts"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "ctrader-open-api==0.9.2",
+    "plotly>=6,<7",
     "python-dotenv>=1.0,<2",
     "service-identity[idna]>=24,<27",
 ]
@@ -46,3 +47,7 @@ select = [
 python_version = "3.12"
 strict = true
 packages = ["nds_bot"]
+
+[[tool.mypy.overrides]]
+module = ["plotly", "plotly.*"]
+ignore_missing_imports = true
