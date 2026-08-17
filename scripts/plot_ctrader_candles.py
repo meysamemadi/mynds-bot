@@ -28,7 +28,11 @@ from twisted.python.failure import Failure
 from nds_bot.config import load_settings
 from nds_bot.domain.market.candle import Candle
 from nds_bot.domain.market.timeframe import Timeframe
-from nds_bot.domain.market.trend import CubicTrendFit, fit_cubic_midpoint_trend
+from nds_bot.domain.market.trend import (
+    CubicTrendFit,
+    fit_cubic_close_trend,
+    fit_cubic_midpoint_trend,
+)
 from nds_bot.domain.market.z import (
     DEFAULT_Z_BARS_AFTER,
     DEFAULT_Z_REFERENCE_LOOKBACK_BARS,
@@ -606,6 +610,7 @@ def main() -> None:
     z_anchors: dict[tuple[str, Timeframe], ZAnchor] = {}
     z_windows: dict[tuple[str, Timeframe], ZCalculationWindow] = {}
     trend_fits: dict[tuple[str, Timeframe], CubicTrendFit] = {}
+    close_trend_fits: dict[tuple[str, Timeframe], CubicTrendFit] = {}
     calculation_time = datetime.now(UTC)
 
     print()
@@ -617,7 +622,6 @@ def main() -> None:
         "Calculation range after Z: "
         f"Z+1 through Z+{Z_BARS_AFTER} closed candles"
     )
-    print("Cubic trend input: midpoint=(High+Low)/2 from Z through window end")
 
     for key, candles in series.items():
         symbol, timeframe = key
@@ -649,7 +653,9 @@ def main() -> None:
         )
         if len(trend_candles) >= 4:
             trend_fit = fit_cubic_midpoint_trend(trend_candles)
+            close_trend_fit = fit_cubic_close_trend(trend_candles)
             trend_fits[key] = trend_fit
+            close_trend_fits[key] = close_trend_fit
         else:
             trend_fit = None
 
@@ -693,6 +699,7 @@ def main() -> None:
         z_anchors=z_anchors,
         z_windows=z_windows,
         trend_fits=trend_fits,
+        close_trend_fits=close_trend_fits,
     )
 
     resolved_path = chart_path.resolve()
