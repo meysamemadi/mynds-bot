@@ -14,7 +14,6 @@ from nds_bot.domain.market.timeframe import Timeframe
 from nds_bot.domain.market.trend import (
     CubicTrendFit,
     TrendNode,
-    TrendNodeType,
     find_cubic_trend_nodes,
 )
 from nds_bot.domain.market.z import ZAnchor, ZCalculationWindow
@@ -368,6 +367,7 @@ def build_candlestick_figure(
     z_anchor: ZAnchor | None = None,
     z_window: ZCalculationWindow | None = None,
     trend_fit: CubicTrendFit | None = None,
+    close_trend_fit: CubicTrendFit | None = None,
 ) -> go.Figure:
     if not candles:
         raise ValueError("candles cannot be empty")
@@ -394,11 +394,22 @@ def build_candlestick_figure(
     if z_window is not None and z_window.candles:
         figure.add_trace(_build_z_window_end_trace(z_window, visible=True))
 
-    if trend_fit is not None:
-        figure.add_trace(_build_cubic_trend_trace(trend_fit, visible=True))
-        nodes = find_cubic_trend_nodes(trend_fit)
-        if nodes:
-            figure.add_trace(_build_trend_nodes_trace(nodes, visible=True))
+    _add_trend_fit_traces(
+        figure,
+        trend_fit,
+        visible=True,
+        line_color="#42a5f5",
+        source_label="Midpoint",
+        trace_name="Cubic midpoint trend",
+    )
+    _add_trend_fit_traces(
+        figure,
+        close_trend_fit,
+        visible=True,
+        line_color="#ff9800",
+        source_label="Close",
+        trace_name="Cubic close trend",
+    )
 
     _apply_layout(
         figure,
@@ -416,6 +427,7 @@ def write_switchable_candlestick_chart(
     z_anchors: Mapping[tuple[str, Timeframe], ZAnchor] | None = None,
     z_windows: Mapping[tuple[str, Timeframe], ZCalculationWindow] | None = None,
     trend_fits: Mapping[tuple[str, Timeframe], CubicTrendFit] | None = None,
+    close_trend_fits: Mapping[tuple[str, Timeframe], CubicTrendFit] | None = None,
 ) -> Path:
     if not series:
         raise ValueError("series cannot be empty")
@@ -426,7 +438,6 @@ def write_switchable_candlestick_chart(
 
     figure = go.Figure()
     trace_keys: list[str] = []
-    node_counts: dict[tuple[str, Timeframe], int] = {}
 
     for (symbol, timeframe), candles in series.items():
         _validate_series(symbol=symbol, timeframe=timeframe, candles=candles)
@@ -460,19 +471,29 @@ def write_switchable_candlestick_chart(
 
         if trend_fits is not None:
             trend_fit = trend_fits.get((symbol, timeframe))
-            if trend_fit is not None:
-                trace_keys.append(selection_key)
-                figure.add_trace(
-                    _build_cubic_trend_trace(trend_fit, visible=is_visible)
-                )
+            _append_switchable_trend_fit_traces(
+                figure,
+                trace_keys,
+                selection_key,
+                trend_fit,
+                visible=is_visible,
+                line_color="#42a5f5",
+                source_label="Midpoint",
+                trace_name="Cubic midpoint trend",
+            )
 
-                nodes = find_cubic_trend_nodes(trend_fit)
-                node_counts[(symbol, timeframe)] = len(nodes)
-                if nodes:
-                    trace_keys.append(selection_key)
-                    figure.add_trace(
-                        _build_trend_nodes_trace(nodes, visible=is_visible)
-                    )
+        if close_trend_fits is not None:
+            close_trend_fit = close_trend_fits.get((symbol, timeframe))
+            _append_switchable_trend_fit_traces(
+                figure,
+                trace_keys,
+                selection_key,
+                close_trend_fit,
+                visible=is_visible,
+                line_color="#ff9800",
+                source_label="Close",
+                trace_name="Cubic close trend",
+            )
 
     initial_title = f"{initial_symbol} — {initial_timeframe.value}"
     _apply_workspace_layout(figure)
@@ -511,12 +532,7 @@ def write_switchable_candlestick_chart(
         for timeframe in timeframes
     )
 
-    window_meta = _window_metadata(
-        series,
-        z_windows,
-        trend_fits,
-        node_counts,
-    )
+    window_meta = _window_metadata(series, z_windows)
     document = _HTML_TEMPLATE
     replacements = {
         "__PAGE_TITLE__": escape(f"{initial_title} — cTrader"),
@@ -536,6 +552,87 @@ def write_switchable_candlestick_chart(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(document, encoding="utf-8")
     return output_path
+
+
+def _add_trend_fit_traces(
+    figure: go.Figure,
+    trend_fit: CubicTrendFit | None,
+    *,
+    visible: bool,
+    line_color: str,
+    source_label: str,
+    trace_name: str,
+) -> None:
+    if trend_fit is None:
+        return
+
+    figure.add_trace(
+        _build_cubic_trend_trace(
+            trend_fit,
+            visible=visible,
+            line_color=line_color,
+            source_label=source_label,
+            trace_name=trace_name,
+        )
+    )
+    nodes = find_cubic_trend_nodes(trend_fit)
+    if not nodes:
+        return
+
+    figure.add_trace(_build_first_derivative_nodes_trace(nodes, visible=visible))
+    signed_nodes = tuple(node for node in nodes if node.second_derivative != 0)
+    if signed_nodes:
+        figure.add_trace(
+            _build_second_derivative_nodes_trace(
+                trend_fit,
+                signed_nodes,
+                visible=visible,
+            )
+        )
+
+
+def _append_switchable_trend_fit_traces(
+    figure: go.Figure,
+    trace_keys: list[str],
+    selection_key: str,
+    trend_fit: CubicTrendFit | None,
+    *,
+    visible: bool,
+    line_color: str,
+    source_label: str,
+    trace_name: str,
+) -> None:
+    if trend_fit is None:
+        return
+
+    trace_keys.append(selection_key)
+    figure.add_trace(
+        _build_cubic_trend_trace(
+            trend_fit,
+            visible=visible,
+            line_color=line_color,
+            source_label=source_label,
+            trace_name=trace_name,
+        )
+    )
+
+    nodes = find_cubic_trend_nodes(trend_fit)
+    if not nodes:
+        return
+
+    trace_keys.append(selection_key)
+    figure.add_trace(_build_first_derivative_nodes_trace(nodes, visible=visible))
+
+    signed_nodes = tuple(node for node in nodes if node.second_derivative != 0)
+    if signed_nodes:
+        trace_keys.append(selection_key)
+        figure.add_trace(
+            _build_second_derivative_nodes_trace(
+                trend_fit,
+                signed_nodes,
+                visible=visible,
+            )
+        )
 
 
 def _validate_series(
@@ -671,6 +768,9 @@ def _build_cubic_trend_trace(
     trend_fit: CubicTrendFit,
     *,
     visible: bool,
+    line_color: str,
+    source_label: str,
+    trace_name: str,
 ) -> go.Scatter:
     residuals = [
         observed - fitted
@@ -681,8 +781,8 @@ def _build_cubic_trend_trace(
         )
     ]
     customdata = [
-        [float(midpoint), float(fitted), float(residual), index]
-        for index, (midpoint, fitted, residual) in enumerate(
+        [float(observed), float(fitted), float(residual), index]
+        for index, (observed, fitted, residual) in enumerate(
             zip(
                 trend_fit.midpoint_prices,
                 trend_fit.fitted_prices,
@@ -696,85 +796,80 @@ def _build_cubic_trend_trace(
         x=list(trend_fit.times),
         y=[float(price) for price in trend_fit.fitted_prices],
         mode="lines",
-        line={"color": "#42a5f5", "width": 2},
+        line={"color": line_color, "width": 2},
         customdata=customdata,
         hovertemplate=(
-            "Cubic trend"
+            f"{source_label} cubic trend"
             "<br>x=%{customdata[3]}"
-            "<br>Midpoint=%{customdata[0]:.5f}"
+            f"<br>{source_label}=%{{customdata[0]:.5f}}"
             "<br>Fitted=%{customdata[1]:.5f}"
             "<br>Residual=%{customdata[2]:.5f}"
             "<extra></extra>"
         ),
-        name="Cubic midpoint trend",
+        name=trace_name,
         visible=visible,
         showlegend=False,
     )
 
 
-def _build_trend_nodes_trace(
+def _build_first_derivative_nodes_trace(
     nodes: Sequence[TrendNode],
     *,
     visible: bool,
 ) -> go.Scatter:
-    labels = [
-        f"N{index} {node.node_type.value}"
-        for index, node in enumerate(nodes, start=1)
-    ]
-    marker_symbols = [_node_marker_symbol(node.node_type) for node in nodes]
-    marker_colors = [_node_marker_color(node.node_type) for node in nodes]
-    customdata = [
-        [
-            float(node.x),
-            float(node.first_derivative),
-            float(node.second_derivative),
-            node.node_type.value,
-        ]
+    return go.Scatter(
+        x=[node.time for node in nodes],
+        y=[float(node.price) for node in nodes],
+        mode="markers",
+        marker={
+            "symbol": "circle",
+            "size": 7,
+            "color": "#ffd700",
+            "line": {"width": 1, "color": "#0b0e11"},
+        },
+        hoverinfo="skip",
+        name="First derivative nodes",
+        visible=visible,
+        showlegend=False,
+    )
+
+
+def _build_second_derivative_nodes_trace(
+    trend_fit: CubicTrendFit,
+    nodes: Sequence[TrendNode],
+    *,
+    visible: bool,
+) -> go.Scatter:
+    offset = _second_derivative_marker_offset(trend_fit, nodes)
+    colors = [
+        "#26a69a" if node.second_derivative > 0 else "#ef5350"
         for node in nodes
     ]
 
     return go.Scatter(
         x=[node.time for node in nodes],
-        y=[float(node.price) for node in nodes],
-        mode="markers+text",
+        y=[float(node.price + offset) for node in nodes],
+        mode="markers",
         marker={
-            "symbol": marker_symbols,
-            "size": 12,
-            "color": marker_colors,
+            "symbol": "circle",
+            "size": 6,
+            "color": colors,
             "line": {"width": 1, "color": "#0b0e11"},
         },
-        text=labels,
-        textposition="top center",
-        textfont={"size": 11},
-        customdata=customdata,
-        hovertemplate=(
-            "%{text}"
-            "<br>x=%{customdata[0]:.6f}"
-            "<br>Trend price=%{y:.5f}"
-            "<br>T'(x)=%{customdata[1]:.8g}"
-            "<br>T''(x)=%{customdata[2]:.8g}"
-            "<extra></extra>"
-        ),
-        name="Trend nodes",
+        hoverinfo="skip",
+        name="Second derivative direction",
         visible=visible,
         showlegend=False,
     )
 
 
-def _node_marker_symbol(node_type: TrendNodeType) -> str:
-    if node_type is TrendNodeType.MAXIMUM:
-        return "triangle-down"
-    if node_type is TrendNodeType.MINIMUM:
-        return "triangle-up"
-    return "diamond"
-
-
-def _node_marker_color(node_type: TrendNodeType) -> str:
-    if node_type is TrendNodeType.MAXIMUM:
-        return "#ef5350"
-    if node_type is TrendNodeType.MINIMUM:
-        return "#26a69a"
-    return "#ffd700"
+def _second_derivative_marker_offset(
+    trend_fit: CubicTrendFit,
+    nodes: Sequence[TrendNode],
+) -> Decimal:
+    price_range = max(trend_fit.fitted_prices) - min(trend_fit.fitted_prices)
+    point = max(_decimal_point(node.price) for node in nodes)
+    return max(price_range * Decimal("0.015"), point * Decimal(10))
 
 
 def _decimal_point(value: Decimal) -> Decimal:
@@ -787,8 +882,6 @@ def _decimal_point(value: Decimal) -> Decimal:
 def _window_metadata(
     series: Mapping[tuple[str, Timeframe], Sequence[Candle]],
     z_windows: Mapping[tuple[str, Timeframe], ZCalculationWindow] | None,
-    trend_fits: Mapping[tuple[str, Timeframe], CubicTrendFit] | None,
-    node_counts: Mapping[tuple[str, Timeframe], int],
 ) -> dict[str, dict[str, str | int | bool]]:
     result: dict[str, dict[str, str | int | bool]] = {}
     if z_windows is None:
@@ -801,15 +894,6 @@ def _window_metadata(
             continue
 
         status = "complete" if window.complete else "incomplete"
-        fit = None if trend_fits is None else trend_fits.get(key)
-        fit_label = ""
-        if fit is not None:
-            fit_label = f" · cubic points: {fit.point_count}"
-
-        node_label = ""
-        if fit is not None:
-            node_label = f" · nodes: {node_counts.get(key, 0)}"
-
         result[_selection_key(symbol, timeframe)] = {
             "available": window.available_bars,
             "requested": window.requested_bars_after_z,
@@ -817,7 +901,6 @@ def _window_metadata(
             "label": (
                 f"Z window: {window.available_bars}/"
                 f"{window.requested_bars_after_z} bars ({status})"
-                f"{fit_label}{node_label}"
             ),
         }
 
