@@ -1,10 +1,14 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
+
 from nds_bot.domain.market.candle import Candle
 from nds_bot.domain.market.timeframe import Timeframe
 from nds_bot.domain.market.z import (
+    ZAnchor,
     ZSelectionMode,
+    build_z_calculation_window,
     find_bull_reference_high,
     find_bull_z_anchor,
     resolve_z_anchor,
@@ -162,3 +166,70 @@ def test_manual_time_outside_loaded_closed_history_is_rejected() -> None:
     )
 
     assert z is None
+
+
+def test_z_window_excludes_z_and_limits_calculations_to_200_bars() -> None:
+    candles = [
+        _candle(index, high=str(100 + index), low=str(90 + index))
+        for index in range(205)
+    ]
+    z = ZAnchor(
+        bar_index=2,
+        time=candles[2].opened_at,
+        price=candles[2].low,
+        reference_index=4,
+        reference_high=candles[4].high,
+        left_boundary_index=None,
+        all_time_high_mode=True,
+    )
+
+    window = build_z_calculation_window(candles, z)
+
+    assert window.available_bars == 200
+    assert window.complete is True
+    assert window.first_bar_index == 3
+    assert window.last_bar_index == 202
+    assert window.candles[0] == candles[3]
+    assert window.candles[-1] == candles[202]
+
+
+def test_z_window_reports_incomplete_when_200_future_bars_do_not_exist() -> None:
+    candles = [
+        _candle(index, high=str(100 + index), low=str(90 + index))
+        for index in range(6)
+    ]
+    z = ZAnchor(
+        bar_index=3,
+        time=candles[3].opened_at,
+        price=candles[3].low,
+        reference_index=4,
+        reference_high=candles[4].high,
+        left_boundary_index=None,
+        all_time_high_mode=True,
+    )
+
+    window = build_z_calculation_window(candles, z)
+
+    assert window.available_bars == 2
+    assert window.complete is False
+    assert window.first_bar_index == 4
+    assert window.last_bar_index == 5
+
+
+def test_z_window_rejects_anchor_index_time_mismatch() -> None:
+    candles = [
+        _candle(0, high="10", low="5"),
+        _candle(1, high="11", low="4"),
+    ]
+    z = ZAnchor(
+        bar_index=0,
+        time=candles[1].opened_at,
+        price=candles[0].low,
+        reference_index=1,
+        reference_high=candles[1].high,
+        left_boundary_index=None,
+        all_time_high_mode=True,
+    )
+
+    with pytest.raises(ValueError, match="index/time"):
+        build_z_calculation_window(candles, z)
