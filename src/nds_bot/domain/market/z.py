@@ -12,17 +12,17 @@ from nds_bot.domain.market.candle import Candle
 DEFAULT_Z_REFERENCE_LOOKBACK_BARS = 200
 
 
-def _positive_env_int(name: str, default: int) -> int:
+def _non_negative_env_int(name: str, default: int) -> int:
     value = getenv(name)
     parsed = int(value) if value else default
 
-    if parsed <= 0:
-        raise RuntimeError(f"{name} must be greater than zero")
+    if parsed < 0:
+        raise RuntimeError(f"{name} must be zero or greater")
 
     return parsed
 
 
-DEFAULT_Z_BARS_AFTER = _positive_env_int("Z_BARS_AFTER", 200)
+DEFAULT_Z_BARS_AFTER = _non_negative_env_int("Z_BARS_AFTER", 200)
 
 
 class ZSelectionMode(StrEnum):
@@ -46,8 +46,8 @@ class ZCalculationWindow:
     """Closed candles available after Z for downstream calculations.
 
     Z itself is intentionally not counted. With bars_after_z=200, the window
-    contains at most Z+1 through Z+200, matching the range convention used by
-    NodeCounterv2.
+    contains at most Z+1 through Z+200. With bars_after_z=0, the window contains
+    every supplied closed candle after Z through the latest available candle.
     """
 
     z_anchor: ZAnchor
@@ -62,6 +62,8 @@ class ZCalculationWindow:
 
     @property
     def complete(self) -> bool:
+        if self.requested_bars_after_z == 0:
+            return True
         return self.available_bars == self.requested_bars_after_z
 
 
@@ -154,8 +156,8 @@ def build_z_calculation_window(
     *,
     bars_after_z: int = DEFAULT_Z_BARS_AFTER,
 ) -> ZCalculationWindow:
-    if bars_after_z <= 0:
-        raise ValueError("bars_after_z must be positive")
+    if bars_after_z < 0:
+        raise ValueError("bars_after_z must be zero or greater")
 
     if z_anchor.bar_index < 0 or z_anchor.bar_index >= len(candles):
         raise ValueError("Z anchor index is outside the supplied candles")
@@ -165,7 +167,10 @@ def build_z_calculation_window(
         raise ValueError("Z anchor index/time does not match supplied candles")
 
     first_index = z_anchor.bar_index + 1
-    end_exclusive = min(len(candles), first_index + bars_after_z)
+    if bars_after_z == 0:
+        end_exclusive = len(candles)
+    else:
+        end_exclusive = min(len(candles), first_index + bars_after_z)
     window_candles = tuple(candles[first_index:end_exclusive])
 
     if not window_candles:
