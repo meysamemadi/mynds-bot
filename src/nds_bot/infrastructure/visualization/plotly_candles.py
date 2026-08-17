@@ -11,6 +11,7 @@ import plotly.io as pio
 
 from nds_bot.domain.market.candle import Candle
 from nds_bot.domain.market.timeframe import Timeframe
+from nds_bot.domain.market.trend import CubicTrendFit
 from nds_bot.domain.market.z import ZAnchor, ZCalculationWindow
 
 
@@ -20,6 +21,7 @@ def build_candlestick_figure(
     title: str | None = None,
     z_anchor: ZAnchor | None = None,
     z_window: ZCalculationWindow | None = None,
+    trend_fit: CubicTrendFit | None = None,
 ) -> go.Figure:
     if not candles:
         raise ValueError("candles cannot be empty")
@@ -46,6 +48,9 @@ def build_candlestick_figure(
     if z_window is not None and z_window.candles:
         figure.add_trace(_build_z_window_end_trace(z_window, visible=True))
 
+    if trend_fit is not None:
+        figure.add_trace(_build_cubic_trend_trace(trend_fit, visible=True))
+
     _apply_layout(
         figure,
         title=title or f"{first.symbol} — {first.timeframe.value}",
@@ -61,6 +66,7 @@ def write_switchable_candlestick_chart(
     initial_timeframe: Timeframe,
     z_anchors: Mapping[tuple[str, Timeframe], ZAnchor] | None = None,
     z_windows: Mapping[tuple[str, Timeframe], ZCalculationWindow] | None = None,
+    trend_fits: Mapping[tuple[str, Timeframe], CubicTrendFit] | None = None,
 ) -> Path:
     if not series:
         raise ValueError("series cannot be empty")
@@ -102,6 +108,14 @@ def write_switchable_candlestick_chart(
                     _build_z_window_end_trace(z_window, visible=is_visible)
                 )
 
+        if trend_fits is not None:
+            trend_fit = trend_fits.get((symbol, timeframe))
+            if trend_fit is not None:
+                trace_keys.append(selection_key)
+                figure.add_trace(
+                    _build_cubic_trend_trace(trend_fit, visible=is_visible)
+                )
+
     initial_title = f"{initial_symbol} — {initial_timeframe.value}"
     _apply_workspace_layout(figure)
 
@@ -139,7 +153,7 @@ def write_switchable_candlestick_chart(
         for timeframe in timeframes
     )
 
-    window_meta = _window_metadata(series, z_windows)
+    window_meta = _window_metadata(series, z_windows, trend_fits)
     trace_keys_json = json.dumps(trace_keys)
     window_meta_json = json.dumps(window_meta)
     initial_symbol_json = json.dumps(initial_symbol)
@@ -620,6 +634,56 @@ def _build_z_window_end_trace(
     )
 
 
+def _build_cubic_trend_trace(
+    trend_fit: CubicTrendFit,
+    *,
+    visible: bool,
+) -> go.Scatter:
+    residuals = [
+        observed - fitted
+        for observed, fitted in zip(
+            trend_fit.midpoint_prices,
+            trend_fit.fitted_prices,
+            strict=True,
+        )
+    ]
+    customdata = [
+        [
+            float(midpoint),
+            float(fitted),
+            float(residual),
+            index,
+        ]
+        for index, (midpoint, fitted, residual) in enumerate(
+            zip(
+                trend_fit.midpoint_prices,
+                trend_fit.fitted_prices,
+                residuals,
+                strict=True,
+            )
+        )
+    ]
+
+    return go.Scatter(
+        x=list(trend_fit.times),
+        y=[float(price) for price in trend_fit.fitted_prices],
+        mode="lines",
+        line={"color": "#42a5f5", "width": 2},
+        customdata=customdata,
+        hovertemplate=(
+            "Cubic trend"
+            "<br>x=%{customdata[3]}"
+            "<br>Midpoint=%{customdata[0]:.5f}"
+            "<br>Fitted=%{customdata[1]:.5f}"
+            "<br>Residual=%{customdata[2]:.5f}"
+            "<extra></extra>"
+        ),
+        name="Cubic midpoint trend",
+        visible=visible,
+        showlegend=False,
+    )
+
+
 def _decimal_point(value: Decimal) -> Decimal:
     exponent = value.as_tuple().exponent
     if not isinstance(exponent, int):
@@ -630,17 +694,24 @@ def _decimal_point(value: Decimal) -> Decimal:
 def _window_metadata(
     series: Mapping[tuple[str, Timeframe], Sequence[Candle]],
     z_windows: Mapping[tuple[str, Timeframe], ZCalculationWindow] | None,
+    trend_fits: Mapping[tuple[str, Timeframe], CubicTrendFit] | None,
 ) -> dict[str, dict[str, str | int | bool]]:
     result: dict[str, dict[str, str | int | bool]] = {}
     if z_windows is None:
         return result
 
     for symbol, timeframe in series:
-        window = z_windows.get((symbol, timeframe))
+        key = (symbol, timeframe)
+        window = z_windows.get(key)
         if window is None:
             continue
 
         status = "complete" if window.complete else "incomplete"
+        fit = None if trend_fits is None else trend_fits.get(key)
+        fit_label = ""
+        if fit is not None:
+            fit_label = f" · cubic points: {fit.point_count}"
+
         result[_selection_key(symbol, timeframe)] = {
             "available": window.available_bars,
             "requested": window.requested_bars_after_z,
@@ -648,6 +719,7 @@ def _window_metadata(
             "label": (
                 f"Z window: {window.available_bars}/"
                 f"{window.requested_bars_after_z} bars ({status})"
+                f"{fit_label}"
             ),
         }
 
