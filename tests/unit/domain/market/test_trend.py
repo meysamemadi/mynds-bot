@@ -5,7 +5,12 @@ import pytest
 
 from nds_bot.domain.market.candle import Candle
 from nds_bot.domain.market.timeframe import Timeframe
-from nds_bot.domain.market.trend import candle_midpoint, fit_cubic_midpoint_trend
+from nds_bot.domain.market.trend import (
+    TrendNodeType,
+    candle_midpoint,
+    find_cubic_trend_nodes,
+    fit_cubic_midpoint_trend,
+)
 
 BASE_TIME = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -67,3 +72,43 @@ def test_cubic_fit_requires_at_least_four_candles() -> None:
 
     with pytest.raises(ValueError, match="at least 4 candles"):
         fit_cubic_midpoint_trend(candles)
+
+
+def test_first_derivative_finds_nodes_and_second_derivative_classifies_them() -> None:
+    candles = []
+    for index in range(7):
+        x = Decimal(index)
+        midpoint = Decimal(100) + x**3 - Decimal(6) * x**2 + Decimal(9) * x
+        candles.append(_candle(index, midpoint=midpoint))
+
+    fit = fit_cubic_midpoint_trend(candles)
+    nodes = find_cubic_trend_nodes(fit)
+
+    assert len(nodes) == 2
+
+    first, second = nodes
+    tolerance = Decimal("1e-40")
+
+    assert abs(first.x - Decimal(1)) < tolerance
+    assert abs(first.first_derivative) < tolerance
+    assert first.second_derivative < 0
+    assert first.node_type is TrendNodeType.MAXIMUM
+    assert first.time == BASE_TIME + timedelta(minutes=1)
+
+    assert abs(second.x - Decimal(3)) < tolerance
+    assert abs(second.first_derivative) < tolerance
+    assert second.second_derivative > 0
+    assert second.node_type is TrendNodeType.MINIMUM
+    assert second.time == BASE_TIME + timedelta(minutes=3)
+
+
+def test_monotonic_cubic_has_no_stationary_nodes_in_window() -> None:
+    candles = []
+    for index in range(7):
+        x = Decimal(index)
+        midpoint = Decimal(100) + x**3 + x
+        candles.append(_candle(index, midpoint=midpoint))
+
+    fit = fit_cubic_midpoint_trend(candles)
+
+    assert find_cubic_trend_nodes(fit) == ()
