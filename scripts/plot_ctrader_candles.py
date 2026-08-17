@@ -28,6 +28,11 @@ from twisted.python.failure import Failure
 from nds_bot.config import load_settings
 from nds_bot.domain.market.candle import Candle
 from nds_bot.domain.market.timeframe import Timeframe
+from nds_bot.domain.market.z import (
+    DEFAULT_Z_REFERENCE_LOOKBACK_BARS,
+    ZAnchor,
+    find_bull_z_anchor,
+)
 from nds_bot.infrastructure.market_data.ctrader.trendbar_mapper import (
     CTraderTrendbar,
     map_trendbar_to_candle,
@@ -40,6 +45,7 @@ AUTH_TIMEOUT_SECONDS = 20
 MARKET_DATA_TIMEOUT_SECONDS = 60
 HISTORICAL_CHUNK_SIZE = 1000
 HISTORICAL_REQUEST_DELAY_SECONDS = 0.25
+Z_REFERENCE_LOOKBACK_BARS = DEFAULT_Z_REFERENCE_LOOKBACK_BARS
 
 TIMEFRAMES = (
     Timeframe.M1,
@@ -477,11 +483,52 @@ def main() -> None:
             f"Expected {expected_series_count} chart series, received {len(series)}"
         )
 
+    z_anchors: dict[tuple[str, Timeframe], ZAnchor] = {}
+    calculation_time = datetime.now(UTC)
+
+    print()
+    print(
+        "Calculating Bull Z anchors with NodeCounterv2 contract: "
+        f"reference_lookback={Z_REFERENCE_LOOKBACK_BARS}"
+    )
+
+    for key, candles in series.items():
+        symbol, timeframe = key
+        closed_candles = [
+            candle
+            for candle in candles
+            if candle.closed_at <= calculation_time
+        ]
+
+        z_anchor = find_bull_z_anchor(
+            closed_candles,
+            reference_lookback=Z_REFERENCE_LOOKBACK_BARS,
+        )
+
+        if z_anchor is None:
+            print(f"Z not found: {symbol} {timeframe.value}")
+            continue
+
+        z_anchors[key] = z_anchor
+        mode = "ATH" if z_anchor.all_time_high_mode else "BOUNDED"
+        boundary = (
+            "none"
+            if z_anchor.left_boundary_index is None
+            else str(z_anchor.left_boundary_index)
+        )
+        print(
+            f"Z ready: {symbol} {timeframe.value} "
+            f"time={z_anchor.time.isoformat()} price={z_anchor.price} "
+            f"reference_high={z_anchor.reference_high} "
+            f"boundary={boundary} mode={mode}"
+        )
+
     chart_path = write_switchable_candlestick_chart(
         series,
         output_path=Path("artifacts/ctrader_candles.html"),
         initial_symbol="GOLD",
         initial_timeframe=Timeframe.M1,
+        z_anchors=z_anchors,
     )
 
     resolved_path = chart_path.resolve()
