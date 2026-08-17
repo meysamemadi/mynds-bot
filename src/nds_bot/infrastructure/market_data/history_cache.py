@@ -74,13 +74,25 @@ class CandleHistoryCache:
             "timeframe": timeframe.value,
             "candles": [_serialize_candle(candle) for candle in normalized],
         }
+        serialized = json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
 
         temporary_path = path.with_suffix(path.suffix + ".tmp")
-        temporary_path.write_text(
-            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-            encoding="utf-8",
-        )
-        temporary_path.replace(path)
+        temporary_path.write_text(serialized, encoding="utf-8")
+
+        try:
+            temporary_path.replace(path)
+        except OSError:
+            # Some Windows environments temporarily block an atomic replace
+            # (antivirus/indexer/file preview). Falling back to a direct write
+            # keeps the market-data pipeline running instead of aborting all
+            # remaining symbol/timeframe downloads.
+            path.write_text(serialized, encoding="utf-8")
+            temporary_path.unlink(missing_ok=True)
+
         return path
 
     def path_for(self, *, symbol: str, timeframe: Timeframe) -> Path:
