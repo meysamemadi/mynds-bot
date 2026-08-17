@@ -9,14 +9,21 @@ from nds_bot.domain.market.trend import (
     TrendNodeType,
     candle_midpoint,
     find_cubic_trend_nodes,
+    fit_cubic_close_trend,
     fit_cubic_midpoint_trend,
 )
 
 BASE_TIME = datetime(2026, 1, 1, tzinfo=UTC)
 
 
-def _candle(index: int, *, midpoint: Decimal) -> Candle:
+def _candle(
+    index: int,
+    *,
+    midpoint: Decimal,
+    close: Decimal | None = None,
+) -> Candle:
     opened_at = BASE_TIME + timedelta(minutes=index)
+    close_price = midpoint if close is None else close
     return Candle(
         symbol="GOLD",
         timeframe=Timeframe.M1,
@@ -25,7 +32,7 @@ def _candle(index: int, *, midpoint: Decimal) -> Candle:
         open=midpoint,
         high=midpoint + Decimal("1"),
         low=midpoint - Decimal("1"),
-        close=midpoint,
+        close=close_price,
         volume=Decimal("1"),
     )
 
@@ -64,6 +71,40 @@ def test_cubic_fit_recovers_exact_degree_three_series() -> None:
     assert fit.times[0] == candles[0].opened_at
     assert fit.times[-1] == candles[-1].opened_at
     assert fit.midpoint_prices[4] == candle_midpoint(candles[4])
+    assert fit.mse < Decimal("1e-80")
+
+
+def test_close_cubic_fit_uses_close_prices() -> None:
+    expected = (
+        Decimal("4"),
+        Decimal("-2"),
+        Decimal("0.75"),
+        Decimal("-0.05"),
+    )
+    candles = []
+    for index in range(10):
+        x = Decimal(index)
+        close = (
+            expected[0]
+            + expected[1] * x
+            + expected[2] * x**2
+            + expected[3] * x**3
+        )
+        candles.append(
+            _candle(
+                index,
+                midpoint=Decimal("100"),
+                close=close,
+            )
+        )
+
+    fit = fit_cubic_close_trend(candles)
+
+    tolerance = Decimal("1e-40")
+    for actual, wanted in zip(fit.coefficients, expected, strict=True):
+        assert abs(actual - wanted) < tolerance
+
+    assert fit.midpoint_prices == tuple(candle.close for candle in candles)
     assert fit.mse < Decimal("1e-80")
 
 
